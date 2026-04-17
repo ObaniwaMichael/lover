@@ -1,5 +1,5 @@
-
 import { useEffect, useRef, useState } from "react";
+import logger from "@/lib/logger";
 import { ArrowRight } from "lucide-react";
 import LottieAnimation from "./LottieAnimation";
 
@@ -25,7 +25,7 @@ const Hero = () => {
     fetch('/loop-header.lottie')
       .then(response => response.json())
       .then(data => setLottieData(data))
-      .catch(error => console.error("Error loading Lottie animation:", error));
+      .catch((error) => logger.error("Error loading Lottie animation:", error));
   }, []);
 
   useEffect(() => {

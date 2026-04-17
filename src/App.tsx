@@ -8,6 +8,7 @@ import { ThemeProvider } from "next-themes";
 import { AuthProvider } from "./contexts/AuthContext";
 import ErrorBoundary from "./components/ErrorBoundary";
 import LoadingSpinner from "./components/LoadingSpinner";
+import { DevTerminalReporter } from "./components/DevTerminalReporter";
 import logger from "./lib/logger";
 
 // Lazy load pages for code splitting
@@ -44,6 +45,7 @@ const App = () => {
             <Sonner />
             <AuthProvider>
               <BrowserRouter>
+                {import.meta.env.DEV ? <DevTerminalReporter /> : null}
                 <Suspense fallback={<LoadingSpinner />}>
                   <Routes>
                     <Route path="/" element={<Index />} />

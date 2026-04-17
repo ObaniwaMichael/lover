@@ -1,4 +1,6 @@
 import logger from './logger';
+import { getApiBaseUrl } from '@/config/site';
+import { jsonAuthHeaders } from './auth-headers';
 
 interface ApiResponse<T = unknown> {
   data?: T;
@@ -38,7 +40,7 @@ class ApiClient {
         ...options,
         signal: controller.signal,
         headers: {
-          'Content-Type': 'application/json',
+          ...jsonAuthHeaders(),
           ...options.headers,
         },
       });
@@ -125,7 +127,7 @@ class ApiClient {
 
 // Create default API client instance
 export const apiClient = new ApiClient({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000',
+  baseURL: getApiBaseUrl(),
   timeout: 15000,
   retries: 3,
 });

@@ -5,20 +5,28 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:reload": "pm2 reload ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop lovers-backend"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.39.0",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^12.2.0",
+    "compression": "^1.8.1",
+    "connect-timeout": "^1.9.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^4.19.2",
+    "express-async-errors": "^3.1.1",
     "express-rate-limit": "^8.0.1",
     "express-slow-down": "^2.1.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.1",
+    "pg": "^8.20.0",
     "socket.io": "^4.8.1",
     "sqlite3": "^5.1.7"
   },

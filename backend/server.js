@@ -1,11 +1,13 @@
 import express from 'express';
+import 'express-async-errors';
 import cors from 'cors';
+import compression from 'compression';
+import morgan from 'morgan';
 import { Server as SocketIOServer } from 'socket.io';
 import http from 'http';
 import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import slowDown from 'express-slow-down';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -13,8 +15,11 @@ import ServerMonitor from './monitoring.js';
 import DatabaseManager from './database.js';
 import User from './user_model.js'; // Supabase-based User model
 import validateEnvironment from './env-validator.js';
-import { supabaseConnected } from './supabase-client.js';
+import { initGeminiModels, isGeminiAvailable, geminiGenerateText } from './gemini-client.js';
+import { supabase, supabaseConnected } from './supabase-client.js';
 import MultiplayerModel from './multiplayer_model.js'; // Import Supabase connection status
+import { authenticateToken } from './middleware/authMiddleware.js';
+import { requireMaintenanceKey } from './middleware/maintenanceAuth.js';
 
 // Load environment variables
 import { fileURLToPath } from 'url';
@@ -29,60 +34,40 @@ validateEnvironment();
 
 // Debug: Check if environment variables are loaded
 console.log('🔍 Environment check:');
-console.log('  GEMINI_API_KEY:', process.env.GEMINI_API_KEY ? 'Found' : 'Not found');
+initGeminiModels();
 console.log('  SUPABASE_URL:', process.env.SUPABASE_URL ? 'Found' : 'Not found');
 console.log('  SUPABASE_ANON_KEY:', process.env.SUPABASE_ANON_KEY ? 'Found' : 'Not found');
 console.log('  PORT:', process.env.PORT || 'Using default');
 console.log('  NODE_ENV:', process.env.NODE_ENV || 'development');
 
-const app = express();
-const PORT = process.env.PORT || 4000;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || 'https://lover-livid.vercel.app/';
+/** In production, omit chat/question bodies from logs unless LOG_MULTIPLAYER_CONTENT=1. */
+const logMultiplayerMessageContent =
+  process.env.NODE_ENV === 'production'
+    ? process.env.LOG_MULTIPLAYER_CONTENT === '1'
+    : process.env.LOG_MULTIPLAYER_CONTENT !== '0';
 
-// Trust proxy for Render (required for rate limiting behind proxy)
-// Set to 1 to trust only the first proxy (Render's load balancer)
-app.set('trust proxy', 1);
+const app = express();
+const PORT = Number(process.env.PORT || 4000);
+/** Bind on all interfaces for VMs / containers (Oracle Cloud, Docker). */
+const HOST = process.env.HOST || '0.0.0.0';
+// Production: set to your SPA origin, e.g. https://your-vm.example.com (see backend/.env.example)
+const CORS_ORIGIN = process.env.CORS_ORIGIN || (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:5729/');
+
+// Behind Oracle Cloud LB / nginx: set TRUST_PROXY=1 (or hop count). TRUST_PROXY=0 disables.
+if (process.env.TRUST_PROXY === '0' || process.env.TRUST_PROXY === 'false') {
+  app.set('trust proxy', false);
+} else if (process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', true);
+} else if (process.env.TRUST_PROXY_HOPS) {
+  app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS) || 1);
+} else {
+  app.set('trust proxy', 1);
+}
 
 // Initialize monitoring and database
 const monitor = new ServerMonitor();
 const db = new DatabaseManager();
-
-// MongoDB connection status (set to false since we're using Supabase)
-const mongoConnected = false;
-
-// Initialize Gemini AI with error handling
-let genAI, model;
-try {
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_API_KEY) {
-    console.warn('⚠️  No GEMINI_API_KEY found in environment variables');
-    console.error('❌ Gemini AI initialization failed - no API key provided');
-    model = null;
-  } else {
-    genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-    // Try gemini-pro first (most widely available), then fallback to other models
-    try {
-      model = genAI.getGenerativeModel({ model: "gemini-pro" });
-      console.log('✅ Gemini AI initialized with API key (model: gemini-pro)');
-    } catch (modelError) {
-      try {
-        model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-        console.log('✅ Gemini AI initialized with API key (model: gemini-1.5-pro)');
-      } catch (fallbackError) {
-        try {
-    model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-          console.log('✅ Gemini AI initialized with API key (model: gemini-1.5-flash)');
-        } catch (finalError) {
-          console.error('❌ Failed to initialize any Gemini model:', finalError.message);
-          model = null;
-        }
-      }
-    }
-  }
-} catch (error) {
-  console.error('❌ Failed to initialize Gemini AI:', error.message);
-  model = null;
-}
+await db.initialize();
 
 // Security middleware with enhanced configuration
 app.use(helmet({
@@ -109,6 +94,103 @@ app.use(helmet({
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' }
 }));
 
+// CORS must run before /api rate limiters: otherwise OPTIONS preflight can get 429/other
+// responses without Access-Control-* headers and the browser reports a CORS failure.
+const buildAllowedOrigins = () => {
+  if (process.env.NODE_ENV === 'production') {
+    const corsOrigin = (CORS_ORIGIN || '').trim();
+    const normalized = corsOrigin.endsWith('/') ? corsOrigin.slice(0, -1) : corsOrigin;
+    if (!normalized) {
+      console.warn(
+        '⚠️ CORS_ORIGIN is not set. Set it to your self-hosted SPA origin (e.g. https://your-vm.example.com) or browsers will be blocked.'
+      );
+      return [];
+    }
+    return [normalized, corsOrigin];
+  }
+  const devOrigins = [
+    'http://localhost:5173',
+    'http://localhost:5729',
+    'http://localhost:8080',
+    'http://localhost:8081',
+    'http://localhost:3000',
+  ];
+  const fromEnv = (CORS_ORIGIN || '').trim();
+  if (fromEnv) {
+    const n = fromEnv.endsWith('/') ? fromEnv.slice(0, -1) : fromEnv;
+    [n, fromEnv].forEach((o) => {
+      if (o && !devOrigins.includes(o)) devOrigins.push(o);
+    });
+  }
+  return devOrigins;
+};
+
+const allowedOrigins = buildAllowedOrigins();
+
+/** In development, allow any http(s) origin on localhost / 127.0.0.1 so Vite can use alternate ports (5730, etc.). */
+const isLocalDevBrowserOrigin = (origin) => {
+  if (process.env.NODE_ENV === 'production') return false;
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
+};
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+
+    if (isLocalDevBrowserOrigin(origin)) {
+      return callback(null, true);
+    }
+
+    const normalizedOrigin = origin.endsWith('/') ? origin.slice(0, -1) : origin;
+
+    const isAllowed = allowedOrigins.some((allowed) => {
+      const normalizedAllowed = allowed.endsWith('/') ? allowed.slice(0, -1) : allowed;
+      const match =
+        origin === allowed ||
+        origin === normalizedAllowed ||
+        normalizedOrigin === allowed ||
+        normalizedOrigin === normalizedAllowed ||
+        origin.startsWith(allowed) ||
+        normalizedOrigin.startsWith(normalizedAllowed);
+      return match;
+    });
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.warn(`🚫 CORS blocked origin: ${origin}. Allowed: ${allowedOrigins.join(', ')}`);
+      callback(null, false);
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  credentials: true,
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+app.use(
+  compression({
+    threshold: 1024,
+    filter: (req, res) => {
+      if (req.headers['x-no-compression']) return false;
+      return compression.filter(req, res);
+    },
+  }),
+);
+
+const skipHealthAndMetrics = (req) =>
+  req.path === '/health' || req.path === '/metrics';
+
 // Rate limiting with improved configuration
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -121,10 +203,11 @@ const limiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: false,
   skipFailedRequests: false,
-  keyGenerator: (req) => {
-    // Use IP + user agent for better rate limiting
-    return req.ip + ':' + (req.headers['user-agent'] || 'unknown');
-  }
+  skip: skipHealthAndMetrics,
+  keyGenerator: (req) =>
+    ipKeyGenerator(req.ip ?? '127.0.0.1') +
+    ':' +
+    (req.headers['user-agent'] || 'unknown'),
 });
 
 const aiLimiter = rateLimit({
@@ -138,10 +221,10 @@ const aiLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: false,
   skipFailedRequests: false,
-  keyGenerator: (req) => {
-    // Use IP + user agent for better rate limiting
-    return req.ip + ':' + (req.headers['user-agent'] || 'unknown');
-  }
+  keyGenerator: (req) =>
+    ipKeyGenerator(req.ip ?? '127.0.0.1') +
+    ':' +
+    (req.headers['user-agent'] || 'unknown'),
 });
 
 // Auth-specific rate limiting
@@ -154,16 +237,19 @@ const authLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => {
-    return req.ip + ':' + (req.headers['user-agent'] || 'unknown');
-  }
+  keyGenerator: (req) =>
+    ipKeyGenerator(req.ip ?? '127.0.0.1') +
+    ':' +
+    (req.headers['user-agent'] || 'unknown'),
 });
 
-// Speed limiting
+// Speed limiting (built on express-rate-limit; supports `skip` in v2.1+)
 const speedLimiter = slowDown({
   windowMs: 15 * 60 * 1000, // 15 minutes
   delayAfter: 50, // allow 50 requests per 15 minutes without delay
   delayMs: () => 500, // add 500ms delay per request after delayAfter
+  skip: skipHealthAndMetrics,
+  validate: { delayMs: false },
 });
 
 // Apply rate limiting
@@ -174,99 +260,47 @@ app.use(speedLimiter);
 
 
 
-// Build allowed origins array - normalize trailing slashes
-const buildAllowedOrigins = () => {
-  if (process.env.NODE_ENV === 'production') {
-    // Use CORS_ORIGIN from env var, normalize trailing slash
-    const corsOrigin = (CORS_ORIGIN || '').trim();
-    const normalized = corsOrigin.endsWith('/') ? corsOrigin.slice(0, -1) : corsOrigin;
-    // Always include both with and without trailing slash, and base domain
-    const origins = normalized ? [normalized, corsOrigin] : ['https://lover-livid.vercel.app'];
-    // Also add base domain without trailing slash
-    if (normalized && normalized !== 'https://lover-livid.vercel.app') {
-      origins.push('https://lover-livid.vercel.app');
-    }
-    return origins;
-  }
-  return ['http://localhost:5173', 'http://localhost:8080', 'http://localhost:8081', 'http://localhost:3000'];
-};
-
-const allowedOrigins = buildAllowedOrigins();
-
-const corsOptions = {
-  origin: function (origin, callback) {
-    // Allow requests with no origin (mobile apps, Postman, curl, etc.)
-    if (!origin) return callback(null, true);
-    
-    // Normalize origin (remove trailing slash for comparison)
-    const normalizedOrigin = origin.endsWith('/') ? origin.slice(0, -1) : origin;
-    
-    // Check both original and normalized versions
-    const isAllowed = allowedOrigins.some(allowed => {
-      const normalizedAllowed = allowed.endsWith('/') ? allowed.slice(0, -1) : allowed;
-      const match = origin === allowed || origin === normalizedAllowed || 
-             normalizedOrigin === allowed || normalizedOrigin === normalizedAllowed ||
-             origin.startsWith(allowed) || normalizedOrigin.startsWith(normalizedAllowed);
-      return match;
-    });
-    
-    if (isAllowed) {
-      callback(null, true);
-    } else {
-      console.warn(`🚫 CORS blocked origin: ${origin}. Allowed: ${allowedOrigins.join(', ')}`);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-  credentials: true,
-  preflightContinue: false,
-  optionsSuccessStatus: 204
-};
-
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Handle preflight for all routes
-
-// Body parsing with limits
-app.use(express.json({ 
-  limit: '10mb',
-  verify: (req, res, buf) => {
-    try {
-      JSON.parse(buf);
-    } catch (e) {
-      res.status(400).json({ error: 'Invalid JSON' });
-      throw new Error('Invalid JSON');
-    }
-  }
-}));
+// Body parsing with limits (invalid JSON → Express 400; avoid throwing in verify hook)
+app.use(express.json({ limit: '10mb' }));
 
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Request logging middleware with monitoring
+morgan.token('request-id', (req) => req.requestId || '-');
+
+const accessLogFormat =
+  ':remote-addr :method :url HTTP/:http-version :status :res[content-length] - :response-time ms [:request-id]';
+
+app.use(
+  morgan(accessLogFormat, {
+    skip: (req) => skipHealthAndMetrics(req),
+    stream: { write: (line) => process.stdout.write(line) },
+  }),
+);
+
+// Request ID + monitoring (always records /health internally if you remove skip above)
 app.use((req, res, next) => {
   const start = Date.now();
-  const timestamp = new Date().toISOString();
-  
-  // Log request details
-  console.log(`📨 ${req.method} ${req.path} - ${req.ip} - ${timestamp}`);
-  
-  // Add request ID for tracking
-  req.requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  
+  req.requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+  res.setHeader('X-Request-Id', req.requestId);
+
   res.on('finish', () => {
     const duration = Date.now() - start;
     const status = res.statusCode;
-    const statusEmoji = status >= 500 ? '💥' : status >= 400 ? '⚠️' : status >= 300 ? '🔄' : '✅';
-    
-    console.log(`${statusEmoji} ${req.method} ${req.path} - ${status} - ${duration}ms [${req.requestId}]`);
+    const statusEmoji =
+      status >= 500 ? '💥' : status >= 400 ? '⚠️' : status >= 300 ? '🔄' : '✅';
+
+    if (process.env.NODE_ENV !== 'production' || process.env.LOG_HTTP_VERBOSE === '1') {
+      console.log(
+        `${statusEmoji} ${req.method} ${req.path} - ${status} - ${duration}ms [${req.requestId}]`,
+      );
+    }
     monitor.logRequest(req, res, duration);
-    
-    // Log slow requests
+
     if (duration > 1000) {
-      console.warn(`🐌 Slow request: ${req.method} ${req.path} took ${duration}ms`);
+      console.warn(`🐌 Slow request: ${req.method} ${req.path} took ${duration}ms [${req.requestId}]`);
     }
   });
-  
+
   next();
 });
 
@@ -352,14 +386,23 @@ const validateMessage = (req, res, next) => {
 };
 
 const server = http.createServer(app);
+
+const requestTimeoutMs = Number(process.env.REQUEST_TIMEOUT_MS || 120000);
+server.requestTimeout = requestTimeoutMs;
+server.headersTimeout = Number(
+  process.env.HEADERS_TIMEOUT_MS || Math.min(requestTimeoutMs + 5000, 130000),
+);
+server.keepAliveTimeout = Number(process.env.KEEP_ALIVE_TIMEOUT_MS || 65000);
+server.maxHeadersCount = Number(process.env.MAX_HTTP_HEADERS || 2000);
+
 const io = new SocketIOServer(server, {
   cors: {
     origin: allowedOrigins,
     credentials: true,
   },
-  // Increased timeouts for Render's load balancer and free tier limitations
-  pingTimeout: 120000, // 2 minutes - Render free tier can have longer delays
-  pingInterval: 25000, // 25 seconds - keep connection alive
+  // Long timeouts help reverse proxies and flaky mobile networks
+  pingTimeout: 120000, // 2 minutes
+  pingInterval: 25000,
   // Allow both transports, but prefer websocket
   transports: ['websocket', 'polling'],
   // Allow upgrade from polling to websocket
@@ -371,7 +414,6 @@ const io = new SocketIOServer(server, {
     maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
     skipMiddlewares: true,
   },
-  // Better handling for Render's proxy
   allowEIO3: true,
 });
 
@@ -381,7 +423,7 @@ const aiCompanions = new Map();
 const userConnections = new Map(); // Track user connections for cleanup
 
 // Cleanup old sessions every 30 minutes
-setInterval(() => {
+const sessionCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [sessionId, sessionData] of sessions.entries()) {
     if (now - sessionData.lastActivity > 30 * 60 * 1000) { // 30 minutes
@@ -390,6 +432,9 @@ setInterval(() => {
     }
   }
 }, 30 * 60 * 1000);
+if (typeof sessionCleanupInterval.unref === 'function') {
+  sessionCleanupInterval.unref();
+}
 
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
@@ -446,18 +491,18 @@ io.on('connection', (socket) => {
             console.log(`📊 Created/retrieved multiplayer session in Supabase: ${sessionId}`);
           }
         }
-        // SQLite fallback
+        // Local DB (SQLite or PostgreSQL)
         try {
-          const existingSession = db.getMultiplayerSession(sessionId);
+          const existingSession = await db.getMultiplayerSession(sessionId);
           if (!existingSession) {
-        db.createMultiplayerSession(sessionId, `Multiplayer Session ${sessionId}`);
-            console.log(`📊 Created new multiplayer session in SQLite: ${sessionId}`);
+            await db.createMultiplayerSession(sessionId, `Multiplayer Session ${sessionId}`);
+            console.log(`📊 Created new multiplayer session in database: ${sessionId}`);
           }
         } catch (sqliteError) {
           if (sqliteError.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-            console.log(`📊 Session ${sessionId} already exists in SQLite`);
+            console.log(`📊 Session ${sessionId} already exists locally`);
         } else {
-            console.error('❌ Failed to create multiplayer session in SQLite:', sqliteError);
+            console.error('❌ Failed to create multiplayer session in local DB:', sqliteError);
         }
       }
       } catch (error) {
@@ -488,11 +533,10 @@ io.on('connection', (socket) => {
       if (supabaseConnected) {
         await MultiplayerModel.updateParticipantCount(sessionId, session.participants.size);
       }
-      // SQLite fallback
-    try {
-      db.updateMultiplayerParticipantCount(sessionId, session.participants.size);
+      try {
+        await db.updateMultiplayerParticipantCount(sessionId, session.participants.size);
       } catch (sqliteError) {
-        console.error('❌ Failed to update participant count in SQLite:', sqliteError);
+        console.error('❌ Failed to update participant count in local DB:', sqliteError);
       }
     } catch (error) {
       console.error('❌ Failed to update participant count:', error);
@@ -516,15 +560,15 @@ io.on('connection', (socket) => {
           console.log(`📜 Loading ${previousMessages.length} previous messages from Supabase for session ${sessionId}`);
         }
       }
-      // SQLite fallback if Supabase didn't return messages
+      // Local DB if Supabase didn't return messages
       if (previousMessages.length === 0) {
         try {
-          previousMessages = db.getMultiplayerMessages(sessionId, 100, 0);
+          previousMessages = await db.getMultiplayerMessages(sessionId, 100, 0);
           if (previousMessages && previousMessages.length > 0) {
-            console.log(`📜 Loading ${previousMessages.length} previous messages from SQLite for session ${sessionId}`);
+            console.log(`📜 Loading ${previousMessages.length} previous messages from local DB for session ${sessionId}`);
           }
         } catch (sqliteError) {
-          console.error('❌ Failed to load chat history from SQLite:', sqliteError);
+          console.error('❌ Failed to load chat history from local DB:', sqliteError);
         }
       }
       
@@ -591,13 +635,19 @@ io.on('connection', (socket) => {
     const messageType = data.type || (data.imageData || data.imageUrl ? 'image' : 'text');
     const messageText = data.text || (messageType === 'image' ? '📷 Image' : '');
     
-    console.log(`💬 ${messageType === 'image' ? '📷 Image' : 'Message'} in session ${data.sessionId} from ${playerName} (${socket.id})${messageText && messageText.length > 0 ? ': ' + messageText.substring(0, 50) + '...' : ''}`);
-    console.log(`📊 Session ${data.sessionId} has ${session.participants.size} participants:`, Array.from(session.participants));
+    if (logMultiplayerMessageContent) {
+      console.log(`💬 ${messageType === 'image' ? '📷 Image' : 'Message'} in session ${data.sessionId} from ${playerName} (${socket.id})${messageText && messageText.length > 0 ? ': ' + messageText.substring(0, 50) + '...' : ''}`);
+      console.log(`📊 Session ${data.sessionId} has ${session.participants.size} participants:`, Array.from(session.participants));
+    } else {
+      const previewLen = messageText ? messageText.length : 0;
+      console.log(`💬 ${messageType === 'image' ? '📷 Image' : 'Message'} in session ${data.sessionId} from ${playerName} (${socket.id}) [${messageType}, ${previewLen} chars]`);
+      console.log(`📊 Session ${data.sessionId} has ${session.participants.size} participants`);
+    }
     
     // Update session activity
     session.lastActivity = Date.now();
     
-    // Save message to database
+    // Save message to database before broadcasting (durability)
     try {
       let dbMessageType = 'chat';
       if (messageType === 'image') {
@@ -608,7 +658,6 @@ io.on('connection', (socket) => {
           dbMessageType = 'emoji';
         }
       }
-      // Save to Supabase
       if (supabaseConnected) {
         await MultiplayerModel.addMessage(
           data.sessionId,
@@ -621,12 +670,10 @@ io.on('connection', (socket) => {
           data.imageType || null
         );
       }
-      
-      // SQLite fallback
       try {
-        db.addMultiplayerMessage(data.sessionId, playerName, messageText || '', dbMessageType);
-      } catch (sqliteError) {
-        console.error('❌ Failed to save message to SQLite:', sqliteError);
+        await db.addMultiplayerMessage(data.sessionId, playerName, messageText || '', dbMessageType);
+      } catch (localDbError) {
+        console.error('❌ Failed to save message to local DB:', localDbError);
       }
     } catch (error) {
       console.error('❌ Failed to save multiplayer message to database:', error);
@@ -673,7 +720,11 @@ io.on('connection', (socket) => {
     
     const playerName = socket.playerName || data.playerName || 'Anonymous';
     
-    console.log(`❓ Question asked in session ${data.sessionId} by ${playerName}: ${data.question.substring(0, 50)}...`);
+    if (logMultiplayerMessageContent) {
+      console.log(`❓ Question asked in session ${data.sessionId} by ${playerName}: ${data.question.substring(0, 50)}...`);
+    } else {
+      console.log(`❓ Question asked in session ${data.sessionId} by ${playerName} (${data.question.length} chars)`);
+    }
     
     // Update session activity
     const session = sessions.get(data.sessionId);
@@ -687,11 +738,10 @@ io.on('connection', (socket) => {
       if (supabaseConnected) {
         await MultiplayerModel.addMessage(data.sessionId, playerName, data.question, 'question');
       }
-      // SQLite fallback
-    try {
-      db.addMultiplayerMessage(data.sessionId, playerName, data.question, 'question');
+      try {
+        await db.addMultiplayerMessage(data.sessionId, playerName, data.question, 'question');
       } catch (sqliteError) {
-        console.error('❌ Failed to save question to SQLite:', sqliteError);
+        console.error('❌ Failed to save question to local DB:', sqliteError);
       }
     } catch (error) {
       console.error('❌ Failed to save question to database:', error);
@@ -720,7 +770,11 @@ io.on('connection', (socket) => {
     
     const playerName = socket.playerName || data.playerName || 'Anonymous';
     
-    console.log(`✅ Question answered in session ${data.sessionId} by ${playerName}: ${data.answer.substring(0, 50)}...`);
+    if (logMultiplayerMessageContent) {
+      console.log(`✅ Question answered in session ${data.sessionId} by ${playerName}: ${data.answer.substring(0, 50)}...`);
+    } else {
+      console.log(`✅ Question answered in session ${data.sessionId} by ${playerName} (${data.answer.length} chars)`);
+    }
     
     // Save answer to database
     try {
@@ -728,11 +782,10 @@ io.on('connection', (socket) => {
       if (supabaseConnected) {
         await MultiplayerModel.addMessage(data.sessionId, playerName, data.answer, 'answer');
       }
-      // SQLite fallback
-    try {
-      db.addMultiplayerMessage(data.sessionId, playerName, data.answer, 'answer');
+      try {
+        await db.addMultiplayerMessage(data.sessionId, playerName, data.answer, 'answer');
       } catch (sqliteError) {
-        console.error('❌ Failed to save answer to SQLite:', sqliteError);
+        console.error('❌ Failed to save answer to local DB:', sqliteError);
       }
     } catch (error) {
       console.error('❌ Failed to save answer to database:', error);
@@ -791,7 +844,12 @@ io.on('connection', (socket) => {
     
     const playerName = socket.playerName || data.playerName || 'Anonymous';
     
-    console.log(`🎲 Truth or Dare result in session ${data.sessionId} by ${playerName}: ${data.result.type} - ${data.result.content.substring(0, 50)}...`);
+    if (logMultiplayerMessageContent) {
+      console.log(`🎲 Truth or Dare result in session ${data.sessionId} by ${playerName}: ${data.result.type} - ${data.result.content.substring(0, 50)}...`);
+    } else {
+      const rc = data.result.content ? data.result.content.length : 0;
+      console.log(`🎲 Truth or Dare result in session ${data.sessionId} by ${playerName}: ${data.result.type} (${rc} chars)`);
+    }
     
     // Update session activity
     const session = sessions.get(data.sessionId);
@@ -809,11 +867,10 @@ io.on('connection', (socket) => {
         if (supabaseConnected) {
           await MultiplayerModel.addMessage(data.sessionId, playerName, messageText, 'game');
         }
-        // SQLite fallback
         try {
-          db.addMultiplayerMessage(data.sessionId, playerName, messageText, 'game');
+          await db.addMultiplayerMessage(data.sessionId, playerName, messageText, 'game');
         } catch (sqliteError) {
-          console.error('❌ Failed to save game result to SQLite:', sqliteError);
+          console.error('❌ Failed to save game result to local DB:', sqliteError);
         }
     } catch (error) {
       console.error('❌ Failed to save spin result to database:', error);
@@ -850,7 +907,7 @@ io.on('connection', (socket) => {
   });
 
   // Handle disconnection
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     const playerName = socket.playerName || 'Anonymous';
     console.log(`🔌 User ${playerName} (${socket.id}) disconnected`);
     userConnections.delete(socket.id);
@@ -862,27 +919,23 @@ io.on('connection', (socket) => {
         sessionData.participants.delete(socket.id);
         console.log(`👋 User ${playerName} (${socket.id}) left session ${sessionId}`);
         
-        // Update participant count in database
         try {
-          db.updateMultiplayerParticipantCount(sessionId, sessionData.participants.size);
+          await db.updateMultiplayerParticipantCount(sessionId, sessionData.participants.size);
         } catch (error) {
           console.error('❌ Failed to update participant count on disconnect:', error);
         }
         
-        // If session is empty, remove it
         if (sessionData.participants.size === 0) {
           sessions.delete(sessionId);
           console.log(`🏁 Session ${sessionId} ended (no more participants)`);
           
-          // Deactivate session in database
           try {
-            db.deactivateMultiplayerSession(sessionId);
+            await db.deactivateMultiplayerSession(sessionId);
             console.log(`📊 Deactivated multiplayer session in database: ${sessionId}`);
           } catch (error) {
             console.error('❌ Failed to deactivate multiplayer session:', error);
           }
         } else {
-          // Notify remaining users that someone left
           io.to(sessionId).emit('user-left', { 
             sessionId, 
             userId: socket.id,
@@ -894,53 +947,75 @@ io.on('connection', (socket) => {
   });
 });
 
-// Health check endpoint
+// Health check (OCI / load balancers): stable 200 unless memory critical or high 5xx rate
 app.get('/health', (req, res) => {
   const health = monitor.isHealthy();
+  const statusCode = health.healthy ? 200 : 503;
   const stats = monitor.getStats();
   const memoryUsage = process.memoryUsage();
-  
-  const healthData = {
+  const mb = 1024 * 1024;
+
+  const payload = {
     status: health.healthy ? 'healthy' : 'unhealthy',
     timestamp: new Date().toISOString(),
     uptime: stats.uptime,
     memory: {
-      rss: `${Math.round(memoryUsage.rss / 1024 / 1024)}MB`,
-      heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB`,
-      heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)}MB`,
-      external: `${Math.round(memoryUsage.external / 1024 / 1024)}MB`
+      rssMb: +(memoryUsage.rss / mb).toFixed(1),
+      heapUsedMb: +(memoryUsage.heapUsed / mb).toFixed(1),
+      heapTotalMb: +(memoryUsage.heapTotal / mb).toFixed(1),
     },
-    activeSessions: sessions.size,
-    totalConnections: io.engine.clientsCount,
-    environment: process.env.NODE_ENV || 'development',
-    version: '1.0.0',
-    health: health,
-    stats: stats
+    connections: {
+      sockets: io.engine.clientsCount,
+      multiplayerSessions: sessions.size,
+    },
+    traffic: {
+      successRateSla: stats.requests.successRate,
+      rawSuccessRate: stats.requests.rawSuccessRate,
+      serverErrors: stats.requests.serverErrors,
+      slaRequests: stats.requests.slaTotal,
+    },
+    checks: health,
   };
-  
-  // Set appropriate status code
-  const statusCode = health.healthy ? 200 : 503;
-  res.status(statusCode).json(healthData);
+
+  if (process.env.NODE_ENV !== 'production') {
+    payload.environment = process.env.NODE_ENV || 'development';
+    payload.version = '1.0.0';
+    payload.stats = stats;
+  }
+
+  return res.status(statusCode).json(payload);
 });
 
-// Detailed stats endpoint
-app.get('/api/stats', (req, res) => {
+// JSON metrics (Prometheus text can be added later). Optional: METRICS_SECRET + Authorization: Bearer <secret>
+app.get('/metrics', (req, res) => {
+  const secret = process.env.METRICS_SECRET;
+  if (secret) {
+    const tok =
+      (req.headers.authorization && req.headers.authorization.replace(/^Bearer\s+/i, '')) ||
+      req.query.token;
+    if (tok !== secret) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.json(monitor.getMetricsPayload());
+});
+
+// Detailed stats (JWT required)
+app.get('/api/stats', authenticateToken, (req, res) => {
   res.json(monitor.getStats());
 });
 
 app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Lover\'s Code Backend server is running!',
+  res.json({
+    message: 'Lover backend',
     version: '1.0.0',
-    activeSessions: Array.from(sessions.keys()),
-    totalConnections: io.engine.clientsCount,
     environment: process.env.NODE_ENV || 'development',
-    allowedOrigins: allowedOrigins
   });
 });
 
 // API endpoint to get session info
-app.get('/api/sessions/:sessionId', (req, res) => {
+app.get('/api/sessions/:sessionId', authenticateToken, (req, res) => {
   const { sessionId } = req.params;
   
   if (!sessionId || typeof sessionId !== 'string') {
@@ -965,10 +1040,10 @@ app.get('/api/sessions/:sessionId', (req, res) => {
   }
 });
 
-// --- AI Companion API endpoints with MongoDB persistence ---
+// --- AI Companion API endpoints ---
 
 // /api/ai-companion/initialize
-app.post('/api/ai-companion/initialize', validateCompanionConfig, async (req, res) => {
+app.post('/api/ai-companion/initialize', authenticateToken, validateCompanionConfig, async (req, res) => {
   try {
     const companionConfig = req.sanitizedConfig;
     // Create or get companion in SQLite (legacy/local)
@@ -977,19 +1052,18 @@ app.post('/api/ai-companion/initialize', validateCompanionConfig, async (req, re
     let conversationId;
     
     try {
-      const existingCompanion = db.getCompanionByName(companionConfig.name);
+      const existingCompanion = await db.getCompanionByName(companionConfig.name);
       if (existingCompanion) {
         companionId = existingCompanion.id;
-        db.updateCompanion(companionId, companionConfig);
+        await db.updateCompanion(companionId, companionConfig);
       } else {
-        companionId = db.createCompanion(companionConfig);
+        companionId = await db.createCompanion(companionConfig);
       }
       // Generate session ID
       sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      // Create conversation in SQLite (legacy/local)
-      conversationId = db.createConversation(companionId, sessionId, `Chat with ${companionConfig.name}`);
+      conversationId = await db.createConversation(companionId, sessionId, `Chat with ${companionConfig.name}`);
     } catch (dbError) {
-      console.warn('⚠️  SQLite operations failed, using fallback IDs:', dbError.message);
+      console.warn('⚠️  Database operations failed, using fallback IDs:', dbError.message);
       // Generate fallback IDs if database operations fail
       companionId = 1;
       sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1012,52 +1086,28 @@ Instructions for your greeting:
 - Ask an engaging question to start the conversation
 
 Generate a welcoming first message:`;
-    // Check if AI model is available
-    if (!model) {
+    if (!isGeminiAvailable()) {
       throw new Error('AI model not initialized');
     }
     
-    // Retry logic for API overload
     let retries = 3;
     let greeting = null;
-    let lastError = null;
     while (retries > 0 && !greeting) {
       try {
-        const result = await model.generateContent(context);
-        const response = await result.response;
-        greeting = response.text();
+        greeting = await geminiGenerateText(context);
       } catch (apiError) {
         retries--;
-        lastError = apiError;
         if (retries === 0) throw apiError;
         const delay = Math.pow(2, 3 - retries) * 1000;
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
     if (greeting) {
-      // Save the greeting message to SQLite
       try {
-        db.addMessage(conversationId, 'ai', greeting, 'welcoming');
+        await db.addMessage(conversationId, 'ai', greeting, 'welcoming');
       } catch (dbError) {
-        console.warn('⚠️  SQLite write failed, continuing without saving greeting:', dbError.message);
+        console.warn('⚠️  Database write failed, continuing without saving greeting:', dbError.message);
       }
-      
-      // --- MongoDB: Create conversation document (optional) - DISABLED (using Supabase) ---
-      // MongoDB is disabled - using SQLite for persistence
-      // if (mongoConnected && sessionId && conversationId) {
-      //   try {
-      //     await AIConversation.create({
-      //       sessionId,
-      //       conversationId,
-      //       companionConfig,
-      //       messages: [{ role: 'assistant', content: greeting, timestamp: new Date() }],
-      //       createdAt: new Date(),
-      //       updatedAt: new Date()
-      //     });
-      //   } catch (mongoError) {
-      //     console.warn('⚠️  MongoDB save failed, continuing with SQLite only:', mongoError.message);
-      //   }
-      // }
       
       res.json({
         greeting,
@@ -1084,54 +1134,29 @@ Generate a welcoming first message:`;
 });
 
 // /api/ai-companion/chat
-app.post('/api/ai-companion/chat', validateMessage, validateCompanionConfig, async (req, res) => {
+app.post('/api/ai-companion/chat', authenticateToken, validateMessage, validateCompanionConfig, async (req, res) => {
   try {
     const { sessionId, conversationId } = req.body;
     const message = req.sanitizedMessage;
     const companionConfig = req.sanitizedConfig;
-    // --- MongoDB: Find conversation (optional) - DISABLED (using Supabase) ---
-    let mongoConversation = null;
-    // MongoDB is disabled - using Supabase for persistence
-    // if (mongoConnected && sessionId) {
-    //   try {
-    //     mongoConversation = await AIConversation.findOne({ sessionId });
-    //     if (!mongoConversation && sessionId && conversationId) {
-    //       mongoConversation = await AIConversation.create({
-    //         sessionId,
-    //         conversationId,
-    //         companionConfig,
-    //         messages: [],
-    //         createdAt: new Date(),
-    //         updatedAt: new Date()
-    //       });
-    //     }
-    //     if (mongoConversation) {
-    //       mongoConversation.messages.push({ role: 'user', content: message, timestamp: new Date() });
-    //       mongoConversation.updatedAt = new Date();
-    //       await mongoConversation.save();
-    //     }
-    //   } catch (mongoError) {
-    //     console.warn('⚠️  MongoDB operation failed, continuing with SQLite only:', mongoError.message);
-    //   }
-    // }
-    // --- SQLite (legacy/local) ---
     let conversation = null;
     if (sessionId) {
-      conversation = db.getConversation(sessionId);
+      conversation = await db.getConversation(sessionId);
     } else if (conversationId) {
-      conversation = db.getConversationById(parseInt(conversationId));
+      conversation = await db.getConversationById(parseInt(conversationId));
     }
     if (!conversation) {
       try {
-        let companionId = db.getCompanionByName(companionConfig.name)?.id;
+        const existing = await db.getCompanionByName(companionConfig.name);
+        let companionId = existing?.id;
         if (!companionId) {
-          companionId = db.createCompanion(companionConfig);
+          companionId = await db.createCompanion(companionConfig);
         }
         const newSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const newConversationId = db.createConversation(companionId, newSessionId, `Chat with ${companionConfig.name}`);
-        conversation = db.getConversationById(newConversationId);
+        const newConversationId = await db.createConversation(companionId, newSessionId, `Chat with ${companionConfig.name}`);
+        conversation = await db.getConversationById(newConversationId);
       } catch (dbError) {
-        console.warn('⚠️  SQLite conversation creation failed, using fallback:', dbError.message);
+        console.warn('⚠️  Database conversation creation failed, using fallback:', dbError.message);
         // Create fallback conversation object
         conversation = {
           id: Date.now(),
@@ -1141,26 +1166,18 @@ app.post('/api/ai-companion/chat', validateMessage, validateCompanionConfig, asy
       }
     }
     try {
-      db.addMessage(conversation.id, 'user', message, 'neutral');
+      await db.addMessage(conversation.id, 'user', message, 'neutral');
     } catch (dbError) {
-      console.warn('⚠️  SQLite write failed, continuing without saving message:', dbError.message);
+      console.warn('⚠️  Database write failed, continuing without saving message:', dbError.message);
     }
-    // Get recent conversation history (using SQLite, MongoDB disabled)
     let conversationContext = '';
-    // MongoDB is disabled - using SQLite for conversation history
-    // if (mongoConnected && mongoConversation && mongoConversation.messages.length > 0) {
-    //   const mongoMessages = mongoConversation.messages.slice(-10);
-    //   conversationContext = mongoMessages.map(msg => `${msg.role === 'assistant' ? 'ai' : msg.role}: ${msg.content}`).join('\n');
-    // } else {
-      // Fallback to SQLite conversation history
-      try {
-        const sqliteMessages = db.getRecentMessages(conversation.id, 10);
-        conversationContext = sqliteMessages.map(msg => `${msg.sender}: ${msg.content}`).join('\n');
-      } catch (dbError) {
-        console.warn('⚠️  SQLite history retrieval failed, using empty context:', dbError.message);
-        conversationContext = '';
-      }
-    // }
+    try {
+      const recentMessages = await db.getRecentMessages(conversation.id, 10);
+      conversationContext = recentMessages.map(msg => `${msg.sender}: ${msg.content}`).join('\n');
+    } catch (dbError) {
+      console.warn('⚠️  Database history retrieval failed, using empty context:', dbError.message);
+      conversationContext = '';
+    }
     // Create enhanced context for the AI
     const context = `You are ${companionConfig.name}, an AI companion with the following characteristics:
 
@@ -1186,45 +1203,27 @@ User's message: ${message}
 
 Respond as ${companionConfig.name} with a personal, engaging response:`;
     
-    // Check if AI model is available
-    if (!model) {
+    if (!isGeminiAvailable()) {
       throw new Error('AI model not initialized');
     }
     
-    // Retry logic for API overload with exponential backoff
     let retries = 3;
     let aiResponse = null;
-    let lastError = null;
     while (retries > 0 && !aiResponse) {
       try {
-        const result = await model.generateContent(context);
-        const response = await result.response;
-        aiResponse = response.text();
+        aiResponse = await geminiGenerateText(context);
       } catch (apiError) {
         retries--;
-        lastError = apiError;
         if (retries === 0) throw apiError;
         const delay = Math.pow(2, 3 - retries) * 1000;
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
     if (aiResponse) {
-      // Save AI response to MongoDB (optional) - DISABLED (using Supabase)
-      // if (mongoConnected && mongoConversation) {
-      //   try {
-      //     mongoConversation.messages.push({ role: 'assistant', content: aiResponse, timestamp: new Date() });
-      //     mongoConversation.updatedAt = new Date();
-      //     await mongoConversation.save();
-      //   } catch (mongoError) {
-      //     console.warn('⚠️  MongoDB save failed, continuing with SQLite only:', mongoError.message);
-      //   }
-      // }
-      
-      // Save AI response to SQLite
       try {
-        db.addMessage(conversation.id, 'ai', aiResponse, 'responsive');
+        await db.addMessage(conversation.id, 'ai', aiResponse, 'responsive');
       } catch (dbError) {
-        console.warn('⚠️  SQLite write failed, continuing without saving AI response:', dbError.message);
+        console.warn('⚠️  Database write failed, continuing without saving AI response:', dbError.message);
       }
       
       res.json({
@@ -1265,79 +1264,11 @@ Respond as ${companionConfig.name} with a personal, engaging response:`;
   }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('💥 Unhandled error:', err);
-  monitor.logError(err, { 
-    endpoint: req.path,
-    method: req.method,
-    ip: req.ip 
-  });
-  
-  // Don't expose internal error details to client
-  const isDevelopment = process.env.NODE_ENV === 'development';
-  const errorResponse = {
-    error: 'Internal server error',
-    message: 'Something went wrong. Please try again later.',
-    ...(isDevelopment && { details: err.message })
-  };
-  
-  res.status(500).json(errorResponse);
-});
-
-// Graceful shutdown
-const gracefulShutdown = (signal) => {
-  console.log(`🛑 ${signal} received, shutting down gracefully...`);
-  
-  // Stop accepting new connections
-  server.close(() => {
-    console.log('✅ HTTP server closed');
-    
-    // Close database connections
-    // Supabase uses HTTP connections, no need to close
-    // Close SQLite database
-      db.close();
-      console.log('✅ SQLite database closed');
-      process.exit(0);
-  });
-  
-  // Force close after 10 seconds
-  setTimeout(() => {
-    console.error('❌ Forced shutdown after timeout');
-    process.exit(1);
-  }, 10000);
-};
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Unhandled promise rejection handler
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-// Uncaught exception handler
-process.on('uncaughtException', (error) => {
-  console.error('💥 Uncaught Exception:', error);
-  process.exit(1);
-});
-
-server.listen(PORT, () => {
-  console.log(`🚀 Lover's Code server listening on http://localhost:${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔒 Allowed CORS origins: ${allowedOrigins.join(', ')}`);
-  console.log(`🤖 AI Model: ${model ? 'Available' : 'Not Available'}`);
-  console.log(`✅ Server is ready to accept connections!`);
-}).on('error', (error) => {
-  console.error('❌ Server failed to start:', error);
-  process.exit(1);
-}); 
-
 // Database and conversation management endpoints
-app.get('/api/conversations', (req, res) => {
+app.get('/api/conversations', authenticateToken, async (req, res) => {
   try {
     const { companion_id, limit = 20, offset = 0 } = req.query;
-    const conversations = db.getConversations(
+    const conversations = await db.getConversations(
       companion_id ? parseInt(companion_id) : null,
       parseInt(limit),
       parseInt(offset)
@@ -1358,7 +1289,7 @@ app.get('/api/conversations', (req, res) => {
   }
 });
 
-app.get('/api/conversations/search', (req, res) => {
+app.get('/api/conversations/search', authenticateToken, async (req, res) => {
   try {
     const { q, limit = 20 } = req.query;
     
@@ -1366,7 +1297,7 @@ app.get('/api/conversations/search', (req, res) => {
       return res.status(400).json({ error: 'Search term is required' });
     }
     
-    const conversations = db.searchConversations(q.trim(), parseInt(limit));
+    const conversations = await db.searchConversations(q.trim(), parseInt(limit));
     res.json({ conversations, searchTerm: q });
   } catch (error) {
     console.error('❌ Error searching conversations:', error);
@@ -1375,43 +1306,17 @@ app.get('/api/conversations/search', (req, res) => {
   }
 });
 
-app.get('/api/conversations/:sessionId', async (req, res) => {
+app.get('/api/conversations/:sessionId', authenticateToken, async (req, res) => {
   try {
     const { sessionId } = req.params;
     
-    // --- MongoDB: Fetch conversation (optional) - DISABLED (using Supabase) ---
-    // MongoDB is disabled - using SQLite for persistence
-    // if (mongoConnected) {
-    //   try {
-    //     const mongoConversation = await AIConversation.findOne({ sessionId });
-    //     if (mongoConversation) {
-    //       return res.json({
-    //         conversation: {
-    //           sessionId: mongoConversation.sessionId,
-    //           companionConfig: mongoConversation.companionConfig,
-    //           createdAt: mongoConversation.createdAt,
-    //           updatedAt: mongoConversation.updatedAt
-    //         },
-    //         messages: mongoConversation.messages.map(msg => ({
-    //           sender: msg.role === 'assistant' ? 'ai' : msg.role,
-    //           content: msg.content,
-    //           timestamp: msg.timestamp
-    //         }))
-    //       });
-    //     }
-    //   } catch (mongoError) {
-    //     console.warn('⚠️  MongoDB fetch failed, falling back to SQLite:', mongoError.message);
-    //   }
-    // }
-    
-    // --- Fallback to SQLite ---
-    const conversation = db.getConversation(sessionId);
+    const conversation = await db.getConversation(sessionId);
     if (!conversation) {
       return res.status(404).json({ error: 'Conversation not found' });
     }
     
-    const messages = db.getMessages(conversation.id);
-    const companion = db.getCompanion(conversation.companion_id);
+    const messages = await db.getMessages(conversation.id);
+    const companion = await db.getCompanion(conversation.companion_id);
     
     res.json({
       conversation: {
@@ -1433,10 +1338,10 @@ app.get('/api/conversations/:sessionId', async (req, res) => {
   }
 });
 
-app.get('/api/conversations/:conversationId/export', (req, res) => {
+app.get('/api/conversations/:conversationId/export', authenticateToken, async (req, res) => {
   try {
     const { conversationId } = req.params;
-    const exportData = db.exportConversation(parseInt(conversationId));
+    const exportData = await db.exportConversation(parseInt(conversationId));
     
     if (!exportData) {
       return res.status(404).json({ error: 'Conversation not found' });
@@ -1450,7 +1355,7 @@ app.get('/api/conversations/:conversationId/export', (req, res) => {
   }
 });
 
-app.put('/api/conversations/:conversationId/title', (req, res) => {
+app.put('/api/conversations/:conversationId/title', authenticateToken, async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { title } = req.body;
@@ -1459,7 +1364,7 @@ app.put('/api/conversations/:conversationId/title', (req, res) => {
       return res.status(400).json({ error: 'Title is required' });
     }
     
-    db.updateConversationTitle(parseInt(conversationId), title.trim());
+    await db.updateConversationTitle(parseInt(conversationId), title.trim());
     res.json({ message: 'Title updated successfully' });
   } catch (error) {
     console.error('❌ Error updating conversation title:', error);
@@ -1468,10 +1373,10 @@ app.put('/api/conversations/:conversationId/title', (req, res) => {
   }
 });
 
-app.delete('/api/conversations/:sessionId', (req, res) => {
+app.delete('/api/conversations/:sessionId', authenticateToken, async (req, res) => {
   try {
     const { sessionId } = req.params;
-    db.deactivateConversation(sessionId);
+    await db.deactivateConversation(sessionId);
     res.json({ message: 'Conversation deactivated successfully' });
   } catch (error) {
     console.error('❌ Error deactivating conversation:', error);
@@ -1481,9 +1386,9 @@ app.delete('/api/conversations/:sessionId', (req, res) => {
 });
 
 // Statistics endpoints
-app.get('/api/stats/conversations', (req, res) => {
+app.get('/api/stats/conversations', authenticateToken, async (req, res) => {
   try {
-    const stats = db.getConversationStats();
+    const stats = await db.getConversationStats();
     res.json(stats);
   } catch (error) {
     console.error('❌ Error fetching conversation stats:', error);
@@ -1492,9 +1397,9 @@ app.get('/api/stats/conversations', (req, res) => {
   }
 });
 
-app.get('/api/stats/messages', (req, res) => {
+app.get('/api/stats/messages', authenticateToken, async (req, res) => {
   try {
-    const stats = db.getMessageStats();
+    const stats = await db.getMessageStats();
     res.json(stats);
   } catch (error) {
     console.error('❌ Error fetching message stats:', error);
@@ -1503,9 +1408,9 @@ app.get('/api/stats/messages', (req, res) => {
   }
 });
 
-app.get('/api/stats/companions', (req, res) => {
+app.get('/api/stats/companions', authenticateToken, async (req, res) => {
   try {
-    const stats = db.getCompanionStats();
+    const stats = await db.getCompanionStats();
     res.json(stats);
   } catch (error) {
     console.error('❌ Error fetching companion stats:', error);
@@ -1514,11 +1419,11 @@ app.get('/api/stats/companions', (req, res) => {
   }
 });
 
-// Database maintenance
-app.post('/api/maintenance/cleanup', (req, res) => {
+// Database maintenance (requires MAINTENANCE_SECRET + X-Maintenance-Key in production)
+app.post('/api/maintenance/cleanup', requireMaintenanceKey, async (req, res) => {
   try {
     const { daysOld = 30 } = req.body;
-    const result = db.cleanupOldConversations(parseInt(daysOld));
+    const result = await db.cleanupOldConversations(parseInt(daysOld));
     res.json({ 
       message: 'Cleanup completed successfully',
       deletedCount: result.changes
@@ -1530,9 +1435,9 @@ app.post('/api/maintenance/cleanup', (req, res) => {
   }
 });
 
-app.get('/api/maintenance/size', (req, res) => {
+app.get('/api/maintenance/size', requireMaintenanceKey, async (req, res) => {
   try {
-    const size = db.getDatabaseSize();
+    const size = await db.getDatabaseSize();
     res.json({ 
       sizeBytes: size,
       sizeMB: (size / 1024 / 1024).toFixed(2)
@@ -1545,15 +1450,15 @@ app.get('/api/maintenance/size', (req, res) => {
 });
 
 // Multiplayer API endpoints
-app.get('/api/multiplayer/sessions', (req, res) => {
+app.get('/api/multiplayer/sessions', authenticateToken, async (req, res) => {
   try {
     const { limit = 20, offset = 0, activeOnly = 'false' } = req.query;
-    const sessionsList = db.getMultiplayerSessions(parseInt(limit), parseInt(offset));
+    const sessionsList = await db.getMultiplayerSessions(parseInt(limit), parseInt(offset));
     
     // Filter active sessions if requested
     let filteredSessions = sessionsList;
     if (activeOnly === 'true') {
-      filteredSessions = sessionsList.filter(s => s.is_active === 1);
+      filteredSessions = sessionsList.filter(s => s.is_active === 1 || s.is_active === true);
     }
     
     // Enrich with real-time participant count from in-memory sessions
@@ -1581,7 +1486,7 @@ app.get('/api/multiplayer/sessions', (req, res) => {
 });
 
 // Create a named multiplayer session
-app.post('/api/multiplayer/sessions', (req, res) => {
+app.post('/api/multiplayer/sessions', authenticateToken, async (req, res) => {
   try {
     const { title, sessionId } = req.body;
     
@@ -1598,7 +1503,7 @@ app.post('/api/multiplayer/sessions', (req, res) => {
     
     // Create session in database
     try {
-      db.createMultiplayerSession(finalSessionId, title.trim());
+      await db.createMultiplayerSession(finalSessionId, title.trim());
       console.log(`📊 Created named multiplayer session: ${finalSessionId} - ${title.trim()}`);
       
       res.status(201).json({
@@ -1619,7 +1524,7 @@ app.post('/api/multiplayer/sessions', (req, res) => {
   }
 });
 
-app.get('/api/multiplayer/sessions/search', (req, res) => {
+app.get('/api/multiplayer/sessions/search', authenticateToken, async (req, res) => {
   try {
     const { q, limit = 20 } = req.query;
     
@@ -1627,7 +1532,7 @@ app.get('/api/multiplayer/sessions/search', (req, res) => {
       return res.status(400).json({ error: 'Search term is required' });
     }
     
-    const sessions = db.searchMultiplayerSessions(q.trim(), parseInt(limit));
+    const sessions = await db.searchMultiplayerSessions(q.trim(), parseInt(limit));
     res.json({ sessions, searchTerm: q });
   } catch (error) {
     console.error('❌ Error searching multiplayer sessions:', error);
@@ -1636,16 +1541,16 @@ app.get('/api/multiplayer/sessions/search', (req, res) => {
   }
 });
 
-app.get('/api/multiplayer/sessions/:sessionId', (req, res) => {
+app.get('/api/multiplayer/sessions/:sessionId', authenticateToken, async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const session = db.getMultiplayerSession(sessionId);
+    const session = await db.getMultiplayerSession(sessionId);
     
     if (!session) {
       return res.status(404).json({ error: 'Multiplayer session not found' });
     }
     
-    const messages = db.getMultiplayerMessages(sessionId);
+    const messages = await db.getMultiplayerMessages(sessionId);
     res.json({ session, messages });
   } catch (error) {
     console.error('❌ Error fetching multiplayer session:', error);
@@ -1654,10 +1559,10 @@ app.get('/api/multiplayer/sessions/:sessionId', (req, res) => {
   }
 });
 
-app.get('/api/multiplayer/sessions/:sessionId/export', (req, res) => {
+app.get('/api/multiplayer/sessions/:sessionId/export', authenticateToken, async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const exportData = db.exportMultiplayerSession(sessionId);
+    const exportData = await db.exportMultiplayerSession(sessionId);
     
     if (!exportData) {
       return res.status(404).json({ error: 'Multiplayer session not found' });
@@ -1671,10 +1576,10 @@ app.get('/api/multiplayer/sessions/:sessionId/export', (req, res) => {
   }
 });
 
-app.delete('/api/multiplayer/sessions/:sessionId', (req, res) => {
+app.delete('/api/multiplayer/sessions/:sessionId', authenticateToken, async (req, res) => {
   try {
     const { sessionId } = req.params;
-    db.deactivateMultiplayerSession(sessionId);
+    await db.deactivateMultiplayerSession(sessionId);
     res.json({ message: 'Multiplayer session deactivated successfully' });
   } catch (error) {
     console.error('❌ Error deactivating multiplayer session:', error);
@@ -1684,9 +1589,9 @@ app.delete('/api/multiplayer/sessions/:sessionId', (req, res) => {
 });
 
 // Multiplayer statistics
-app.get('/api/stats/multiplayer', (req, res) => {
+app.get('/api/stats/multiplayer', authenticateToken, async (req, res) => {
   try {
-    const stats = db.getMultiplayerStats();
+    const stats = await db.getMultiplayerStats();
     res.json(stats);
   } catch (error) {
     console.error('❌ Error fetching multiplayer stats:', error);
@@ -1695,9 +1600,9 @@ app.get('/api/stats/multiplayer', (req, res) => {
   }
 });
 
-app.get('/api/stats/multiplayer-messages', (req, res) => {
+app.get('/api/stats/multiplayer-messages', authenticateToken, async (req, res) => {
   try {
-    const stats = db.getMultiplayerMessageStats();
+    const stats = await db.getMultiplayerMessageStats();
     res.json(stats);
   } catch (error) {
     console.error('❌ Error fetching multiplayer message stats:', error);
@@ -1706,36 +1611,7 @@ app.get('/api/stats/multiplayer-messages', (req, res) => {
   }
 });
 
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
-
-// JWT Authentication Middleware
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ error: 'Invalid or expired token' });
-    }
-    req.user = user;
-    next();
-  });
-};
-
-// Test route to verify server is working
-app.get('/api/test', (req, res) => {
-  res.json({ message: 'API is working!', timestamp: new Date().toISOString() });
-});
-
-// Simple auth test route
-app.get('/api/auth/test', (req, res) => {
-  res.json({ message: 'Auth routes are working!', timestamp: new Date().toISOString() });
-});
+const JWT_SECRET = process.env.JWT_SECRET;
 
 // User Registration
 app.post('/api/auth/register', async (req, res) => {
@@ -1799,11 +1675,10 @@ app.post('/api/auth/register', async (req, res) => {
       }
     }
 
-    // Fallback to SQLite registration
+    // Fallback to local DB registration
     try {
-      // Check if user already exists in SQLite (by username or email)
-      const existingUserByUsername = db.getUserByUsername(username);
-      const existingUserByEmail = db.getUserByEmail(email);
+      const existingUserByUsername = await db.getUserByUsername(username);
+      const existingUserByEmail = await db.getUserByEmail(email);
       
       if (existingUserByUsername) {
         return res.status(409).json({ error: 'Username already exists' });
@@ -1817,8 +1692,7 @@ app.post('/api/auth/register', async (req, res) => {
       const passwordHash = await bcrypt.hash(password, 12);
       const newUserId = `user-${Date.now()}`;
       
-      // Create user in SQLite
-      const user = db.createUser(newUserId, username, email, passwordHash);
+      const user = await db.createUser(newUserId, username, email, passwordHash);
       
       // Generate JWT token
       const token = jwt.sign(
@@ -1838,10 +1712,10 @@ app.post('/api/auth/register', async (req, res) => {
         }
       });
 
-    } catch (sqliteError) {
-      console.error('❌ SQLite registration failed:', sqliteError.message);
-      if (sqliteError.message.includes('already exists')) {
-        return res.status(409).json({ error: sqliteError.message });
+    } catch (regError) {
+      console.error('❌ Local DB registration failed:', regError.message);
+      if (regError.message.includes('already exists')) {
+        return res.status(409).json({ error: regError.message });
       }
       return res.status(500).json({ error: 'Registration system unavailable' });
     }
@@ -1925,10 +1799,8 @@ app.post('/api/auth/login', async (req, res) => {
       }
     }
 
-    // Fallback to SQLite authentication
     try {
-      // Find user in SQLite (synchronous, fast)
-      const user = db.getUserByUsername(username);
+      const user = await db.getUserByUsername(username);
       
       if (!user) {
         return res.status(401).json({ error: 'Invalid username or password' });
@@ -1951,8 +1823,7 @@ app.post('/api/auth/login', async (req, res) => {
         return res.status(401).json({ error: 'Invalid username or password' });
       }
 
-      // Update last login
-      db.updateUserLastLogin(user.id);
+      await db.updateUserLastLogin(user.id);
 
       // Generate JWT token
         const token = jwt.sign(
@@ -1972,8 +1843,8 @@ app.post('/api/auth/login', async (req, res) => {
           }
         });
 
-    } catch (sqliteError) {
-      console.error('❌ SQLite authentication failed:', sqliteError.message);
+    } catch (authDbError) {
+      console.error('❌ Local DB authentication failed:', authDbError.message);
       return res.status(500).json({ error: 'Authentication system unavailable' });
     }
 
@@ -2017,7 +1888,7 @@ app.get('/api/auth/profile', authenticateToken, async (req, res) => {
     // Fallback to SQLite user (or if Supabase not connected)
     if (isSQLiteUser || !supabaseConnected) {
       try {
-        const user = db.getUserById(userId);
+        const user = await db.getUserById(userId);
         if (user) {
           return res.json({
             user: {
@@ -2120,7 +1991,7 @@ app.get('/api/auth/me', async (req, res) => {
 app.put('/api/auth/profile', authenticateToken, async (req, res) => {
   try {
     const { username, email } = req.body;
-    const user = await User.findById(req.user.userId).exec();
+    const user = await User.findById(req.user.userId);
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -2143,7 +2014,7 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
 
     // Update in Supabase or SQLite
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.user.userId);
-    if (supabaseConnected && isUUID) {
+    if (supabaseConnected && supabase && isUUID) {
       const updateData = {};
       if (username) updateData.username = username;
       if (email) updateData.email = email;
@@ -2209,7 +2080,11 @@ app.put('/api/auth/password', authenticateToken, async (req, res) => {
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
     
-    if (supabaseConnected && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.user.userId)) {
+    if (
+      supabaseConnected &&
+      supabase &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.user.userId)
+    ) {
       // Update in Supabase
       const { error } = await supabase
         .from('users')
@@ -2236,21 +2111,118 @@ app.post('/api/auth/logout', authenticateToken, (req, res) => {
   res.json({ message: 'Logout successful' });
 });
 
-// Debug route to see all registered routes
-app.get('/api/debug/routes', (req, res) => {
-  const routes = [];
-  app._router.stack.forEach(function(r){
-    if (r.route && r.route.path){
-      routes.push(`${Object.keys(r.route.methods).join(',').toUpperCase()} ${r.route.path}`);
-    }
+if (process.env.NODE_ENV !== 'production') {
+  app.get('/api/debug/routes', (req, res) => {
+    const routes = [];
+    app._router.stack.forEach(function (r) {
+      if (r.route && r.route.path) {
+        routes.push(`${Object.keys(r.route.methods).join(',').toUpperCase()} ${r.route.path}`);
+      }
+    });
+    res.json({ routes });
   });
-  res.json({ routes });
-});
+}
 
-// 404 handler - must be last
+// 404 handler — must stay before error middleware
 app.use('*', (req, res) => {
   res.status(404).json({
     error: 'Not found',
-    message: 'The requested resource was not found.'
+    message: 'The requested resource was not found.',
   });
-}); 
+});
+
+// Global error handler (must be last middleware; requires express-async-errors for thrown async errors)
+app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+  console.error('💥 Unhandled error:', err?.stack || err);
+  monitor.logError(err instanceof Error ? err : new Error(String(err)), {
+    endpoint: req.path,
+    method: req.method,
+    ip: req.ip,
+    requestId: req.requestId,
+  });
+
+  const isDevelopment = process.env.NODE_ENV === 'development';
+  res.status(500).json({
+    error: 'Internal server error',
+    message: 'Something went wrong. Please try again later.',
+    requestId: req.requestId,
+    ...(isDevelopment && err instanceof Error && { details: err.message }),
+  });
+});
+
+let shuttingDown = false;
+
+const gracefulShutdown = (signal) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`🛑 ${signal} received, shutting down gracefully...`);
+
+  try {
+    monitor.stop();
+  } catch (e) {
+    console.error('monitor.stop failed:', e);
+  }
+  clearInterval(sessionCleanupInterval);
+
+  io.disconnectSockets(true);
+  io.close(() => {
+    server.close((closeErr) => {
+      if (closeErr) {
+        console.error('❌ HTTP server close error:', closeErr);
+      } else {
+        console.log('✅ HTTP server closed');
+      }
+      db.close()
+        .then(() => {
+          console.log('✅ Database connections closed');
+          process.exit(0);
+        })
+        .catch((err) => {
+          console.error('❌ Error closing database:', err);
+          process.exit(1);
+        });
+    });
+  });
+
+  setTimeout(() => {
+    console.error('❌ Forced shutdown after timeout');
+    process.exit(1);
+  }, 30000).unref();
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+process.on('unhandledRejection', (reason, promise) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  console.error('💥 Unhandled Rejection:', err?.message || err, promise);
+  monitor.logError(err, { source: 'unhandledRejection' });
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('💥 Uncaught Exception:', error);
+  monitor.logError(error, { source: 'uncaughtException' });
+  try {
+    monitor.stop();
+  } catch (_) {
+    /* ignore */
+  }
+  process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`🚀 Lover's Code server listening on http://${HOST}:${PORT}`);
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🔒 Allowed CORS origins: ${allowedOrigins.join(', ')}`);
+  console.log(`🤖 AI Model: ${isGeminiAvailable() ? 'Available' : 'Not Available'}`);
+  console.log(
+    `⏱️ HTTP requestTimeout=${server.requestTimeout}ms keepAliveTimeout=${server.keepAliveTimeout}ms`,
+  );
+  console.log(`✅ Server is ready to accept connections!`);
+}).on('error', (error) => {
+  console.error('❌ Server failed to start:', error);
+  process.exit(1);
+});

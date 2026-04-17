@@ -10,6 +10,7 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+vite.config.ts.timestamp-*.mjs
 *.local
 
 # Editor directories and files
@@ -38,3 +39,6 @@ backend/config.env
 *.sqlite3
 data/
 backend/data/
+
+# Test coverage output
+coverage/

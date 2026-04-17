@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import HamburgerMenu from "@/components/HamburgerMenu";
 import { apiClient } from "@/lib/api-client";
+import { jsonAuthHeaders } from "@/lib/auth-headers";
 import logger from "@/lib/logger";
 
 interface Message {
@@ -109,7 +110,7 @@ const AICompanionPage: React.FC = () => {
 
       const response = await fetch(API_ENDPOINTS.AI_INITIALIZE, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonAuthHeaders(),
         body: JSON.stringify({ companionConfig: config }),
       });
 
@@ -174,7 +175,7 @@ const AICompanionPage: React.FC = () => {
     try {
       const response = await fetch(API_ENDPOINTS.AI_CHAT, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonAuthHeaders(),
         body: JSON.stringify({
           message: messageToSend,
           companionConfig: companionConfig,

@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
+import { getOnboardingUrl } from "@/config/site";
 
 interface HamburgerMenuProps {
   currentPage: 'solo' | 'multiplayer' | 'ai-companion';
@@ -195,7 +196,7 @@ const HamburgerMenu: React.FC<HamburgerMenuProps> = ({
                           <div className="grid grid-cols-1 gap-2">
                             <Button
                               onClick={() => {
-                                const onboardingUrl = 'https://lover-livid.vercel.app/onboarding';
+                                const onboardingUrl = getOnboardingUrl();
                                 const message = encodeURIComponent(`🎉 Join me on Lover's Code!\n\nSession code: ${sessionId}\n\n📱 How to join:\n\n✨ NEW USERS:\n1. Go to: ${onboardingUrl}\n2. Click "Sign Up" to create your free account\n3. Choose a username, enter your email, and create a password\n4. Once logged in, navigate to Multiplayer\n5. Click "Join Session" and enter the session code: ${sessionId}\n6. Start chatting! 💕\n\n👋 EXISTING USERS:\n1. Go to: ${onboardingUrl}\n2. Click "Sign In" and enter your credentials\n3. Navigate to Multiplayer\n4. Click "Join Session" and enter the session code: ${sessionId}\n5. Start chatting! 💕\n\nLet's connect and have fun together! 🎉`);
                                 window.open(`https://wa.me/?text=${message}`, '_blank');
                               }}
@@ -209,7 +210,7 @@ const HamburgerMenu: React.FC<HamburgerMenuProps> = ({
                             
                             <Button
                               onClick={() => {
-                                const onboardingUrl = 'https://lover-livid.vercel.app/onboarding';
+                                const onboardingUrl = getOnboardingUrl();
                                 const message = `🎉 Join me on Lover's Code!
 
 Session code: ${sessionId}
@@ -250,7 +251,7 @@ Let's connect and have fun together! 🎉`;
                             
                             <Button
                               onClick={() => {
-                                const onboardingUrl = 'https://lover-livid.vercel.app/onboarding';
+                                const onboardingUrl = getOnboardingUrl();
                                 const message = encodeURIComponent(`🎉 Join me on Lover's Code!\n\nSession code: ${sessionId}\n\n📱 How to join:\n\n✨ NEW USERS:\n1. Go to: ${onboardingUrl}\n2. Click "Sign Up" to create your free account\n3. Choose a username, enter your email, and create a password\n4. Once logged in, navigate to Multiplayer\n5. Click "Join Session" and enter the session code: ${sessionId}\n6. Start chatting! 💕\n\n👋 EXISTING USERS:\n1. Go to: ${onboardingUrl}\n2. Click "Sign In" and enter your credentials\n3. Navigate to Multiplayer\n4. Click "Join Session" and enter the session code: ${sessionId}\n5. Start chatting! 💕\n\nLet's connect and have fun together! 🎉`);
                                 window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(onboardingUrl)}&quote=${message}`, '_blank');
                               }}

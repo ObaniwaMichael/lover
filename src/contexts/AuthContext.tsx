@@ -96,16 +96,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
 
   const login = async (username: string, password: string) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
-    
+    let controller = new AbortController();
+    let timeoutId = window.setTimeout(() => controller.abort(), 15000);
+
     try {
       setError(null);
-      
-      // Retry logic for network failures
+
       let lastError: Error | null = null;
       const maxRetries = 2;
-      
+
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
           const response = await fetch(API_ENDPOINTS.AUTH_LOGIN, {
@@ -129,31 +128,25 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           setStoredToken(data.token);
           setToken(data.token);
           setUser(data.user);
-          return; // Success, exit retry loop
+          return;
         } catch (error) {
           clearTimeout(timeoutId);
-          
+
           if (error instanceof Error) {
-            // Don't retry on abort (timeout) or authentication errors
             if (error.name === 'AbortError') {
               throw new Error('Request timed out. Please check your connection and try again.');
             }
-            
-            // Don't retry on 401 (invalid credentials)
+
             if (error.message.includes('401') || error.message.includes('Invalid')) {
               throw error;
             }
-            
+
             lastError = error;
-            
-            // Wait before retrying (exponential backoff)
+
             if (attempt < maxRetries) {
-              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-              // Create new controller for retry
-              const newController = new AbortController();
-              const newTimeoutId = setTimeout(() => newController.abort(), 15000);
-              controller.abort = newController.abort;
-              timeoutId = newTimeoutId as any;
+              await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+              controller = new AbortController();
+              timeoutId = window.setTimeout(() => controller.abort(), 15000);
             }
           } else {
             lastError = new Error('Unknown error occurred');
@@ -173,16 +166,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   };
 
   const register = async (username: string, email: string, password: string) => {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout
-    
+    let controller = new AbortController();
+    let timeoutId = window.setTimeout(() => controller.abort(), 15000);
+
     try {
       setError(null);
-      
-      // Retry logic for network failures
+
       let lastError: Error | null = null;
       const maxRetries = 2;
-      
+
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
           const response = await fetch(API_ENDPOINTS.AUTH_REGISTER, {
@@ -206,32 +198,26 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           setStoredToken(data.token);
           setToken(data.token);
           setUser(data.user);
-          return; // Success, exit retry loop
+          return;
         } catch (error) {
           clearTimeout(timeoutId);
-          
+
           if (error instanceof Error) {
-            // Don't retry on abort (timeout) or validation errors
             if (error.name === 'AbortError') {
               throw new Error('Request timed out. Please check your connection and try again.');
             }
-            
-            // Don't retry on 400 (validation errors) or 409 (user exists)
-            if (error.message.includes('400') || error.message.includes('409') || 
+
+            if (error.message.includes('400') || error.message.includes('409') ||
                 error.message.includes('already exists') || error.message.includes('required')) {
               throw error;
             }
-            
+
             lastError = error;
-            
-            // Wait before retrying (exponential backoff)
+
             if (attempt < maxRetries) {
-              await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-              // Create new controller for retry
-              const newController = new AbortController();
-              const newTimeoutId = setTimeout(() => newController.abort(), 15000);
-              controller.abort = newController.abort;
-              timeoutId = newTimeoutId as any;
+              await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+              controller = new AbortController();
+              timeoutId = window.setTimeout(() => controller.abort(), 15000);
             }
           } else {
             lastError = new Error('Unknown error occurred');

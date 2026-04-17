@@ -7,6 +7,8 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Search, Users, Clock, MessageCircle, Download, Trash2, Hash, Smile } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { jsonAuthHeaders } from '@/lib/auth-headers';
+import logger from '@/lib/logger';
 
 interface MultiplayerSession {
   id: number;
@@ -51,7 +53,7 @@ const MultiplayerHistory: React.FC = () => {
     setError(null);
     setLoading(true);
     try {
-      const response = await fetch(API_ENDPOINTS.MULTIPLAYER_SESSIONS);
+      const response = await fetch(API_ENDPOINTS.MULTIPLAYER_SESSIONS, { headers: jsonAuthHeaders() });
       if (!response.ok) throw new Error('Failed to fetch multiplayer sessions');
       const data = await response.json();
       if (!data.sessions) throw new Error('Malformed response from server');
@@ -72,7 +74,7 @@ const MultiplayerHistory: React.FC = () => {
     setError(null);
     setIsSearching(true);
     try {
-      const response = await fetch(`${API_ENDPOINTS.MULTIPLAYER_SESSIONS_SEARCH}?q=${encodeURIComponent(searchTerm)}`);
+      const response = await fetch(`${API_ENDPOINTS.MULTIPLAYER_SESSIONS_SEARCH}?q=${encodeURIComponent(searchTerm)}`, { headers: jsonAuthHeaders() });
       if (!response.ok) throw new Error('Failed to search multiplayer sessions');
       const data = await response.json();
       if (!data.sessions) throw new Error('Malformed response from server');
@@ -89,7 +91,7 @@ const MultiplayerHistory: React.FC = () => {
     setError(null);
     setLoading(true);
     try {
-      const response = await fetch(API_ENDPOINTS.MULTIPLAYER_SESSION_DETAIL(sessionId));
+      const response = await fetch(API_ENDPOINTS.MULTIPLAYER_SESSION_DETAIL(sessionId), { headers: jsonAuthHeaders() });
       if (!response.ok) throw new Error('Failed to fetch messages');
       const data = await response.json();
       if (!data.messages) throw new Error('Malformed response from server');
@@ -106,7 +108,7 @@ const MultiplayerHistory: React.FC = () => {
   const exportSession = async (sessionId: string) => {
     setIsExporting(true);
     try {
-      const response = await fetch(API_ENDPOINTS.MULTIPLAYER_SESSION_EXPORT(sessionId));
+      const response = await fetch(API_ENDPOINTS.MULTIPLAYER_SESSION_EXPORT(sessionId), { headers: jsonAuthHeaders() });
       const data = await response.json();
       
       // Create and download JSON file
@@ -120,7 +122,7 @@ const MultiplayerHistory: React.FC = () => {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (error) {
-      console.error('Failed to export session:', error);
+      logger.error('Failed to export session:', error);
     } finally {
       setIsExporting(false);
     }
@@ -134,7 +136,8 @@ const MultiplayerHistory: React.FC = () => {
     setIsDeleting(true);
     try {
               await fetch(API_ENDPOINTS.MULTIPLAYER_SESSION_DELETE(sessionId), {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: jsonAuthHeaders(),
       });
       
       // Remove from local state
@@ -144,7 +147,7 @@ const MultiplayerHistory: React.FC = () => {
         setShowMessages(false);
       }
     } catch (error) {
-      console.error('Failed to delete session:', error);
+      logger.error('Failed to delete session:', error);
     } finally {
       setIsDeleting(false);
     }

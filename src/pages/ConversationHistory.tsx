@@ -7,6 +7,8 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Search, MessageCircle, Clock, User, Bot, Download, Trash2, Edit3 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { jsonAuthHeaders } from '@/lib/auth-headers';
+import logger from '@/lib/logger';
 
 interface Conversation {
   id: number;
@@ -52,7 +54,7 @@ const ConversationHistory: React.FC = () => {
     setError(null);
     setLoading(true);
     try {
-      const response = await fetch(API_ENDPOINTS.CONVERSATIONS);
+      const response = await fetch(API_ENDPOINTS.CONVERSATIONS, { headers: jsonAuthHeaders() });
       if (!response.ok) throw new Error('Failed to fetch conversations');
       const data = await response.json();
       if (!data.conversations) throw new Error('Malformed response from server');
@@ -73,7 +75,7 @@ const ConversationHistory: React.FC = () => {
     setError(null);
     setIsSearching(true);
     try {
-      const response = await fetch(`${API_ENDPOINTS.CONVERSATIONS_SEARCH}?q=${encodeURIComponent(searchTerm)}`);
+      const response = await fetch(`${API_ENDPOINTS.CONVERSATIONS_SEARCH}?q=${encodeURIComponent(searchTerm)}`, { headers: jsonAuthHeaders() });
       if (!response.ok) throw new Error('Failed to search conversations');
       const data = await response.json();
       if (!data.conversations) throw new Error('Malformed response from server');
@@ -90,7 +92,7 @@ const ConversationHistory: React.FC = () => {
     setError(null);
     setLoading(true);
     try {
-      const response = await fetch(API_ENDPOINTS.CONVERSATION_DETAIL(sessionId));
+      const response = await fetch(API_ENDPOINTS.CONVERSATION_DETAIL(sessionId), { headers: jsonAuthHeaders() });
       if (!response.ok) throw new Error('Failed to fetch messages');
       const data = await response.json();
       if (!data.messages) throw new Error('Malformed response from server');
@@ -107,7 +109,7 @@ const ConversationHistory: React.FC = () => {
   const exportConversation = async (conversationId: number) => {
     setIsExporting(true);
     try {
-      const response = await fetch(API_ENDPOINTS.CONVERSATION_EXPORT(conversationId.toString()));
+      const response = await fetch(API_ENDPOINTS.CONVERSATION_EXPORT(conversationId.toString()), { headers: jsonAuthHeaders() });
       const data = await response.json();
       
       // Create and download JSON file
@@ -121,7 +123,7 @@ const ConversationHistory: React.FC = () => {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (error) {
-      console.error('Failed to export conversation:', error);
+      logger.error('Failed to export conversation:', error);
     } finally {
       setIsExporting(false);
     }
@@ -132,7 +134,7 @@ const ConversationHistory: React.FC = () => {
     try {
               await fetch(API_ENDPOINTS.CONVERSATION_TITLE(conversationId.toString()), {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonAuthHeaders(),
         body: JSON.stringify({ title: newTitle })
       });
       
@@ -142,7 +144,7 @@ const ConversationHistory: React.FC = () => {
       ));
       setIsEditing(false);
     } catch (error) {
-      console.error('Failed to update title:', error);
+      logger.error('Failed to update title:', error);
     } finally {
       setIsUpdatingTitle(false);
     }
@@ -156,7 +158,8 @@ const ConversationHistory: React.FC = () => {
     setIsDeleting(true);
     try {
               await fetch(API_ENDPOINTS.CONVERSATION_DELETE(sessionId), {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: jsonAuthHeaders(),
       });
       
       // Remove from local state
@@ -166,7 +169,7 @@ const ConversationHistory: React.FC = () => {
         setShowMessages(false);
       }
     } catch (error) {
-      console.error('Failed to delete conversation:', error);
+      logger.error('Failed to delete conversation:', error);
     } finally {
       setIsDeleting(false);
     }

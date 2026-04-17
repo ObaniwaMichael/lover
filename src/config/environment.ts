@@ -1,15 +1,17 @@
 // Environment configuration
+import { getApiBaseUrl, getSocketUrl } from './site';
+
 export const config = {
   // API Configuration
   api: {
-    baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000',
+    baseURL: getApiBaseUrl(),
     timeout: parseInt(import.meta.env.VITE_API_TIMEOUT || '15000'),
     retries: parseInt(import.meta.env.VITE_API_RETRIES || '3'),
   },
   
   // Socket Configuration
   socket: {
-    url: import.meta.env.VITE_SOCKET_URL || 'ws://localhost:4000',
+    url: getSocketUrl(),
     reconnectAttempts: parseInt(import.meta.env.VITE_SOCKET_RECONNECT_ATTEMPTS || '5'),
     reconnectDelay: parseInt(import.meta.env.VITE_SOCKET_RECONNECT_DELAY || '1000'),
   },
@@ -36,19 +38,11 @@ export const config = {
   }
 };
 
-// Validate required environment variables
+/**
+ * Optional client-side check. `VITE_API_BASE_URL` is not required: production builds use
+ * same origin via `site.ts` when unset (typical nginx + VM setup).
+ */
 export const validateEnvironment = () => {
-  const required = [
-    'VITE_API_BASE_URL'
-  ];
-  
-  const missing = required.filter(key => !import.meta.env[key]);
-  
-  if (missing.length > 0 && config.app.environment === 'production') {
-    console.error('Missing required environment variables:', missing);
-    throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
-  }
-  
   return true;
 };
 

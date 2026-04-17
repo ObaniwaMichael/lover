@@ -1,454 +1,353 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import { Pool } from 'pg';
+import SqliteDatabase from './database-sqlite.js';
 
-class DatabaseManager {
+/**
+ * Async data layer: PostgreSQL when DATABASE_URL is set, otherwise SQLite.
+ */
+export default class DatabaseManager {
   constructor() {
-    this.dbPath = './data/lovers_code.db';
-    this.ensureDataDirectory();
-    this.db = new Database(this.dbPath, { readonly: false });
-    this.initializeTables();
-    console.log('✅ Database initialized successfully');
+    this.backend = process.env.DATABASE_URL ? 'postgres' : 'sqlite';
+    this.pg = null;
+    this.sqlite = null;
   }
 
-  ensureDataDirectory() {
-    const dataDir = path.dirname(this.dbPath);
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-  }
-
-  initializeTables() {
-    // Enable foreign keys
-    this.db.pragma('foreign_keys = ON');
-
-    // Migrate users table if needed (from INTEGER id to TEXT id)
-    try {
-      const tableInfo = this.db.prepare("PRAGMA table_info(users)").all();
-      const hasPasswordHash = tableInfo.some(col => col.name === 'password_hash');
-      const hasTextId = tableInfo.some(col => col.name === 'id' && col.type === 'TEXT');
-      
-      if (!hasPasswordHash || !hasTextId) {
-        console.log('🔄 Migrating users table schema...');
-        // Create new table with correct schema
-        this.db.exec(`
-          CREATE TABLE IF NOT EXISTS users_new (
-            id TEXT PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_login DATETIME
-          )
-        `);
-        // Copy data if old table exists
-        try {
-          this.db.exec(`
-            INSERT INTO users_new (id, username, email, created_at, last_login)
-            SELECT CAST(id AS TEXT), username, email, created_at, last_login
-            FROM users
-          `);
-        } catch (e) {
-          // Old table might not exist or have different structure, that's okay
+  async initialize() {
+    if (this.backend === 'postgres') {
+      try {
+        this.pg = new Pool({
+          connectionString: process.env.DATABASE_URL,
+          max: Number(process.env.PG_POOL_MAX || 20),
+          idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30000),
+          connectionTimeoutMillis: Number(process.env.PG_CONNECTION_TIMEOUT_MS || 10000),
+        });
+        this.pg.on('error', (err) => console.error('❌ Unexpected PostgreSQL pool error:', err));
+        await this.ensurePostgresSchema();
+        console.log('✅ PostgreSQL initialized (DATABASE_URL)');
+      } catch (err) {
+        console.warn('⚠️ PostgreSQL unavailable, falling back to SQLite:', err.message || err);
+        if (this.pg) {
+          await this.pg.end().catch(() => {});
+          this.pg = null;
         }
-        // Drop old table and rename new one
-        this.db.exec('DROP TABLE IF EXISTS users');
-        this.db.exec('ALTER TABLE users_new RENAME TO users');
-        console.log('✅ Users table migration complete');
+        this.backend = 'sqlite';
+        this.sqlite = new SqliteDatabase();
       }
-    } catch (migrationError) {
-      console.warn('⚠️  Users table migration skipped:', migrationError.message);
+    } else {
+      this.sqlite = new SqliteDatabase();
+      console.log('✅ SQLite initialized (set DATABASE_URL for PostgreSQL)');
     }
-
-    // Create companions table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS companions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        personality TEXT NOT NULL,
-        identity TEXT NOT NULL,
-        gender TEXT NOT NULL,
-        role TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Create conversations table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS conversations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        companion_id INTEGER NOT NULL,
-        session_id TEXT UNIQUE NOT NULL,
-        title TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        is_active BOOLEAN DEFAULT 1,
-        FOREIGN KEY (companion_id) REFERENCES companions (id) ON DELETE CASCADE
-      )
-    `);
-
-    // Create messages table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        conversation_id INTEGER NOT NULL,
-        sender TEXT NOT NULL CHECK (sender IN ('user', 'ai')),
-        content TEXT NOT NULL,
-        emotion TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
-      )
-    `);
-
-    // Create users table with password storage
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_login DATETIME
-      )
-    `);
-
-    // Create multiplayer sessions table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS multiplayer_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT UNIQUE NOT NULL,
-        title TEXT,
-        participant_count INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        is_active BOOLEAN DEFAULT 1,
-        last_activity DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Create multiplayer messages table
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS multiplayer_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        sender TEXT NOT NULL,
-        content TEXT NOT NULL,
-        message_type TEXT DEFAULT 'chat' CHECK (message_type IN ('chat', 'question', 'answer', 'system', 'emoji', 'image', 'game')),
-        question_number INTEGER,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (session_id) REFERENCES multiplayer_sessions (session_id) ON DELETE CASCADE
-      )
-    `);
-
-    // Create indexes for better performance
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_conversations_companion_id ON conversations(companion_id);
-      CREATE INDEX IF NOT EXISTS idx_conversations_session_id ON conversations(session_id);
-      CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at);
-      CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
-      CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
-      CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
-    `);
-
-    console.log('📊 Database tables initialized');
   }
 
-  // Companion management
-  createCompanion(companionData) {
-    const stmt = this.db.prepare(`
-      INSERT INTO companions (name, personality, identity, gender, role)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    
-    const result = stmt.run(
-      companionData.name,
-      companionData.personality,
-      companionData.identity,
-      companionData.gender,
-      companionData.role
+  async ensurePostgresSchema() {
+    const sql = `
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT UNIQUE NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_login TIMESTAMPTZ
     );
-    
-    return result.lastInsertRowid;
+    CREATE TABLE IF NOT EXISTS companions (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      personality TEXT NOT NULL,
+      identity TEXT NOT NULL,
+      gender TEXT NOT NULL,
+      role TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS conversations (
+      id SERIAL PRIMARY KEY,
+      companion_id INTEGER NOT NULL REFERENCES companions(id) ON DELETE CASCADE,
+      session_id TEXT UNIQUE NOT NULL,
+      title TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      is_active BOOLEAN DEFAULT TRUE
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+      id SERIAL PRIMARY KEY,
+      conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      sender TEXT NOT NULL CHECK (sender IN ('user', 'ai')),
+      content TEXT NOT NULL,
+      emotion TEXT,
+      "timestamp" TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS multiplayer_sessions (
+      id SERIAL PRIMARY KEY,
+      session_id TEXT UNIQUE NOT NULL,
+      title TEXT,
+      participant_count INTEGER DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      is_active BOOLEAN DEFAULT TRUE,
+      last_activity TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS multiplayer_messages (
+      id SERIAL PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES multiplayer_sessions(session_id) ON DELETE CASCADE,
+      sender TEXT NOT NULL,
+      content TEXT NOT NULL,
+      message_type TEXT DEFAULT 'chat' CHECK (message_type IN ('chat', 'question', 'answer', 'system', 'emoji', 'image', 'game')),
+      question_number INTEGER,
+      "timestamp" TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversations_companion_id ON conversations(companion_id);
+    CREATE INDEX IF NOT EXISTS idx_conversations_session_id ON conversations(session_id);
+    CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages("timestamp");
+    CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+    CREATE INDEX IF NOT EXISTS idx_multiplayer_sessions_session_id ON multiplayer_sessions(session_id);
+    CREATE INDEX IF NOT EXISTS idx_multiplayer_messages_session_id ON multiplayer_messages(session_id);
+    CREATE INDEX IF NOT EXISTS idx_multiplayer_messages_timestamp ON multiplayer_messages("timestamp");
+    `;
+    await this.pg.query(sql);
   }
 
-  getCompanion(companionId) {
-    const stmt = this.db.prepare('SELECT * FROM companions WHERE id = ?');
-    return stmt.get(companionId);
+  _normalizeSessionRow(row) {
+    if (!row) return null;
+    return {
+      ...row,
+      is_active: row.is_active === true || row.is_active === 1 ? 1 : 0,
+    };
   }
 
-  getCompanionByName(name) {
-    const stmt = this.db.prepare('SELECT * FROM companions WHERE name = ?');
-    return stmt.get(name);
+  async createCompanion(companionData) {
+    if (this.sqlite) return this.sqlite.createCompanion(companionData);
+    const { rows } = await this.pg.query(
+      `INSERT INTO companions (name, personality, identity, gender, role)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [companionData.name, companionData.personality, companionData.identity, companionData.gender, companionData.role]
+    );
+    return rows[0].id;
   }
 
-  updateCompanion(companionId, companionData) {
-    const stmt = this.db.prepare(`
-      UPDATE companions 
-      SET name = ?, personality = ?, identity = ?, gender = ?, role = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `);
-    
-    return stmt.run(
-      companionData.name,
-      companionData.personality,
-      companionData.identity,
-      companionData.gender,
-      companionData.role,
-      companionId
+  async getCompanion(companionId) {
+    if (this.sqlite) return this.sqlite.getCompanion(companionId);
+    const { rows } = await this.pg.query('SELECT * FROM companions WHERE id = $1', [companionId]);
+    return rows[0] || null;
+  }
+
+  async getCompanionByName(name) {
+    if (this.sqlite) return this.sqlite.getCompanionByName(name);
+    const { rows } = await this.pg.query('SELECT * FROM companions WHERE name = $1', [name]);
+    return rows[0] || null;
+  }
+
+  async updateCompanion(companionId, companionData) {
+    if (this.sqlite) return this.sqlite.updateCompanion(companionId, companionData);
+    await this.pg.query(
+      `UPDATE companions SET name=$1, personality=$2, identity=$3, gender=$4, role=$5, updated_at=NOW() WHERE id=$6`,
+      [companionData.name, companionData.personality, companionData.identity, companionData.gender, companionData.role, companionId]
     );
   }
 
-  // Conversation management
-  createConversation(companionId, sessionId, title = null) {
-    const stmt = this.db.prepare(`
-      INSERT INTO conversations (companion_id, session_id, title)
-      VALUES (?, ?, ?)
-    `);
-    
-    const result = stmt.run(companionId, sessionId, title);
-    return result.lastInsertRowid;
+  async createConversation(companionId, sessionId, title = null) {
+    if (this.sqlite) return this.sqlite.createConversation(companionId, sessionId, title);
+    const { rows } = await this.pg.query(
+      `INSERT INTO conversations (companion_id, session_id, title) VALUES ($1,$2,$3) RETURNING id`,
+      [companionId, sessionId, title]
+    );
+    return rows[0].id;
   }
 
-  getConversation(sessionId) {
-    const stmt = this.db.prepare(`
-      SELECT c.*, comp.name as companion_name, comp.personality, comp.identity, comp.gender, comp.role
-      FROM conversations c
-      JOIN companions comp ON c.companion_id = comp.id
-      WHERE c.session_id = ?
-    `);
-    return stmt.get(sessionId);
+  async getConversation(sessionId) {
+    if (this.sqlite) return this.sqlite.getConversation(sessionId);
+    const { rows } = await this.pg.query(
+      `SELECT c.*, comp.name AS companion_name, comp.personality, comp.identity, comp.gender, comp.role
+       FROM conversations c JOIN companions comp ON c.companion_id = comp.id WHERE c.session_id = $1`,
+      [sessionId]
+    );
+    return rows[0] ? this._normalizeSessionRow(rows[0]) : null;
   }
 
-  getConversationById(conversationId) {
-    const stmt = this.db.prepare(`
-      SELECT c.*, comp.name as companion_name, comp.personality, comp.identity, comp.gender, comp.role
-      FROM conversations c
-      JOIN companions comp ON c.companion_id = comp.id
-      WHERE c.id = ?
-    `);
-    return stmt.get(conversationId);
+  async getConversationById(conversationId) {
+    if (this.sqlite) return this.sqlite.getConversationById(conversationId);
+    const { rows } = await this.pg.query(
+      `SELECT c.*, comp.name AS companion_name, comp.personality, comp.identity, comp.gender, comp.role
+       FROM conversations c JOIN companions comp ON c.companion_id = comp.id WHERE c.id = $1`,
+      [conversationId]
+    );
+    return rows[0] ? this._normalizeSessionRow(rows[0]) : null;
   }
 
-  updateConversationTitle(conversationId, title) {
-    const stmt = this.db.prepare(`
-      UPDATE conversations 
-      SET title = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `);
-    return stmt.run(title, conversationId);
+  async updateConversationTitle(conversationId, title) {
+    if (this.sqlite) return this.sqlite.updateConversationTitle(conversationId, title);
+    await this.pg.query(`UPDATE conversations SET title=$1, updated_at=NOW() WHERE id=$2`, [title, conversationId]);
   }
 
-  deactivateConversation(sessionId) {
-    const stmt = this.db.prepare(`
-      UPDATE conversations 
-      SET is_active = 0, updated_at = CURRENT_TIMESTAMP
-      WHERE session_id = ?
-    `);
-    return stmt.run(sessionId);
+  async deactivateConversation(sessionId) {
+    if (this.sqlite) return this.sqlite.deactivateConversation(sessionId);
+    await this.pg.query(`UPDATE conversations SET is_active=FALSE, updated_at=NOW() WHERE session_id=$1`, [sessionId]);
   }
 
-  // Message management
-  addMessage(conversationId, sender, content, emotion = null) {
-    const stmt = this.db.prepare(`
-      INSERT INTO messages (conversation_id, sender, content, emotion)
-      VALUES (?, ?, ?, ?)
-    `);
-    
-    const result = stmt.run(conversationId, sender, content, emotion);
-    
-    // Update conversation timestamp
-    this.updateConversationTimestamp(conversationId);
-    
-    return result.lastInsertRowid;
+  async addMessage(conversationId, sender, content, emotion = null) {
+    if (this.sqlite) return this.sqlite.addMessage(conversationId, sender, content, emotion);
+    const { rows } = await this.pg.query(
+      `INSERT INTO messages (conversation_id, sender, content, emotion) VALUES ($1,$2,$3,$4) RETURNING id`,
+      [conversationId, sender, content, emotion]
+    );
+    await this.pg.query(`UPDATE conversations SET updated_at=NOW() WHERE id=$1`, [conversationId]);
+    return rows[0].id;
   }
 
-  getMessages(conversationId, limit = 50, offset = 0) {
-    const stmt = this.db.prepare(`
-      SELECT * FROM messages 
-      WHERE conversation_id = ?
-      ORDER BY timestamp ASC
-      LIMIT ? OFFSET ?
-    `);
-    return stmt.all(conversationId, limit, offset);
+  async getMessages(conversationId, limit = 50, offset = 0) {
+    if (this.sqlite) return this.sqlite.getMessages(conversationId, limit, offset);
+    const { rows } = await this.pg.query(
+      `SELECT * FROM messages WHERE conversation_id = $1 ORDER BY timestamp ASC LIMIT $2 OFFSET $3`,
+      [conversationId, limit, offset]
+    );
+    return rows;
   }
 
-  getRecentMessages(conversationId, count = 10) {
-    const stmt = this.db.prepare(`
-      SELECT * FROM messages 
-      WHERE conversation_id = ?
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `);
-    return stmt.all(conversationId, count).reverse();
+  async getRecentMessages(conversationId, count = 10) {
+    if (this.sqlite) return this.sqlite.getRecentMessages(conversationId, count);
+    const { rows } = await this.pg.query(
+      `SELECT * FROM messages WHERE conversation_id = $1 ORDER BY timestamp DESC LIMIT $2`,
+      [conversationId, count]
+    );
+    return rows.reverse();
   }
 
-  updateConversationTimestamp(conversationId) {
-    const stmt = this.db.prepare(`
-      UPDATE conversations 
-      SET updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `);
-    return stmt.run(conversationId);
-  }
-
-  // Multiplayer session management
-  createMultiplayerSession(sessionId, title = null) {
-    // Check if session already exists
-    const existingSession = this.getMultiplayerSession(sessionId);
-    if (existingSession) {
-      // If session exists but is inactive, reactivate it
-      if (!existingSession.is_active) {
-        const updateStmt = this.db.prepare(`
-          UPDATE multiplayer_sessions 
-          SET is_active = 1, last_activity = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-          WHERE session_id = ?
-        `);
-        return updateStmt.run(sessionId);
+  async createMultiplayerSession(sessionId, title = null) {
+    if (this.sqlite) return this.sqlite.createMultiplayerSession(sessionId, title);
+    const existing = await this.getMultiplayerSession(sessionId);
+    if (existing) {
+      if (!existing.is_active) {
+        await this.pg.query(
+          `UPDATE multiplayer_sessions SET is_active=TRUE, last_activity=NOW(), updated_at=NOW() WHERE session_id=$1`,
+          [sessionId]
+        );
+        return;
       }
-      // If session is active, throw error
       throw new Error('Session already exists and is active');
     }
-    
-    const stmt = this.db.prepare(`
-      INSERT INTO multiplayer_sessions (session_id, title)
-      VALUES (?, ?)
-    `);
-    
-    const result = stmt.run(sessionId, title);
-    return result.lastInsertRowid;
+    await this.pg.query(
+      `INSERT INTO multiplayer_sessions (session_id, title) VALUES ($1,$2)`,
+      [sessionId, title]
+    );
   }
 
-  getMultiplayerSession(sessionId) {
-    const stmt = this.db.prepare('SELECT * FROM multiplayer_sessions WHERE session_id = ?');
-    return stmt.get(sessionId);
+  async getMultiplayerSession(sessionId) {
+    if (this.sqlite) return this.sqlite.getMultiplayerSession(sessionId);
+    const { rows } = await this.pg.query('SELECT * FROM multiplayer_sessions WHERE session_id = $1', [sessionId]);
+    return this._normalizeSessionRow(rows[0]) || null;
   }
 
-  updateMultiplayerSessionActivity(sessionId) {
-    const stmt = this.db.prepare(`
-      UPDATE multiplayer_sessions 
-      SET last_activity = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-      WHERE session_id = ?
-    `);
-    return stmt.run(sessionId);
+  async updateMultiplayerSessionActivity(sessionId) {
+    if (this.sqlite) return this.sqlite.updateMultiplayerSessionActivity(sessionId);
+    await this.pg.query(
+      `UPDATE multiplayer_sessions SET last_activity=NOW(), updated_at=NOW() WHERE session_id=$1`,
+      [sessionId]
+    );
   }
 
-  updateMultiplayerParticipantCount(sessionId, count) {
-    const stmt = this.db.prepare(`
-      UPDATE multiplayer_sessions 
-      SET participant_count = ?, last_activity = CURRENT_TIMESTAMP
-      WHERE session_id = ?
-    `);
-    return stmt.run(count, sessionId);
+  async updateMultiplayerParticipantCount(sessionId, count) {
+    if (this.sqlite) return this.sqlite.updateMultiplayerParticipantCount(sessionId, count);
+    await this.pg.query(
+      `UPDATE multiplayer_sessions SET participant_count=$1, last_activity=NOW() WHERE session_id=$2`,
+      [count, sessionId]
+    );
   }
 
-  deactivateMultiplayerSession(sessionId) {
-    const stmt = this.db.prepare(`
-      UPDATE multiplayer_sessions 
-      SET is_active = 0, updated_at = CURRENT_TIMESTAMP
-      WHERE session_id = ?
-    `);
-    return stmt.run(sessionId);
+  async deactivateMultiplayerSession(sessionId) {
+    if (this.sqlite) return this.sqlite.deactivateMultiplayerSession(sessionId);
+    await this.pg.query(
+      `UPDATE multiplayer_sessions SET is_active=FALSE, updated_at=NOW() WHERE session_id=$1`,
+      [sessionId]
+    );
   }
 
-  // Multiplayer message management
-  addMultiplayerMessage(sessionId, sender, content, messageType = 'chat', questionNumber = null) {
-    const stmt = this.db.prepare(`
-      INSERT INTO multiplayer_messages (session_id, sender, content, message_type, question_number)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    
-    const result = stmt.run(sessionId, sender, content, messageType, questionNumber);
-    
-    // Update session activity
-    this.updateMultiplayerSessionActivity(sessionId);
-    
-    return result.lastInsertRowid;
+  async addMultiplayerMessage(sessionId, sender, content, messageType = 'chat', questionNumber = null) {
+    if (this.sqlite) return this.sqlite.addMultiplayerMessage(sessionId, sender, content, messageType, questionNumber);
+    await this.pg.query(
+      `INSERT INTO multiplayer_messages (session_id, sender, content, message_type, question_number)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [sessionId, sender, content, messageType, questionNumber]
+    );
+    await this.updateMultiplayerSessionActivity(sessionId);
   }
 
-  getMultiplayerMessages(sessionId, limit = 100, offset = 0) {
-    const stmt = this.db.prepare(`
-      SELECT * FROM multiplayer_messages 
-      WHERE session_id = ?
-      ORDER BY timestamp ASC
-      LIMIT ? OFFSET ?
-    `);
-    return stmt.all(sessionId, limit, offset);
+  async getMultiplayerMessages(sessionId, limit = 100, offset = 0) {
+    if (this.sqlite) return this.sqlite.getMultiplayerMessages(sessionId, limit, offset);
+    const { rows } = await this.pg.query(
+      `SELECT * FROM multiplayer_messages WHERE session_id = $1 ORDER BY timestamp ASC LIMIT $2 OFFSET $3`,
+      [sessionId, limit, offset]
+    );
+    return rows;
   }
 
-  getRecentMultiplayerMessages(sessionId, count = 20) {
-    const stmt = this.db.prepare(`
-      SELECT * FROM multiplayer_messages 
-      WHERE session_id = ?
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `);
-    return stmt.all(sessionId, count).reverse();
+  async getRecentMultiplayerMessages(sessionId, count = 20) {
+    if (this.sqlite) return this.sqlite.getRecentMultiplayerMessages(sessionId, count);
+    const { rows } = await this.pg.query(
+      `SELECT * FROM multiplayer_messages WHERE session_id = $1 ORDER BY timestamp DESC LIMIT $2`,
+      [sessionId, count]
+    );
+    return rows.reverse();
   }
 
-  // Multiplayer conversation listing and search
-  getMultiplayerSessions(limit = 20, offset = 0) {
-    const stmt = this.db.prepare(`
-      SELECT ms.*,
-             (SELECT COUNT(*) FROM multiplayer_messages WHERE session_id = ms.session_id) as message_count,
-             (SELECT content FROM multiplayer_messages WHERE session_id = ms.session_id ORDER BY timestamp DESC LIMIT 1) as last_message
-      FROM multiplayer_sessions ms
-      ORDER BY ms.updated_at DESC
-      LIMIT ? OFFSET ?
-    `);
-    return stmt.all(limit, offset);
+  async getMultiplayerSessions(limit = 20, offset = 0) {
+    if (this.sqlite) return this.sqlite.getMultiplayerSessions(limit, offset);
+    const { rows } = await this.pg.query(
+      `SELECT ms.*,
+        (SELECT COUNT(*)::int FROM multiplayer_messages mm WHERE mm.session_id = ms.session_id) AS message_count,
+        (SELECT content FROM multiplayer_messages mm2 WHERE mm2.session_id = ms.session_id ORDER BY mm2.timestamp DESC LIMIT 1) AS last_message
+       FROM multiplayer_sessions ms ORDER BY ms.updated_at DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+    return rows.map((r) => this._normalizeSessionRow(r));
   }
 
-  searchMultiplayerSessions(searchTerm, limit = 20) {
-    const stmt = this.db.prepare(`
-      SELECT DISTINCT ms.*,
-             (SELECT COUNT(*) FROM multiplayer_messages WHERE session_id = ms.session_id) as message_count
-      FROM multiplayer_sessions ms
-      JOIN multiplayer_messages mm ON ms.session_id = mm.session_id
-      WHERE ms.title LIKE ? OR mm.content LIKE ? OR ms.session_id LIKE ?
-      ORDER BY ms.updated_at DESC
-      LIMIT ?
-    `);
-    
-    const searchPattern = `%${searchTerm}%`;
-    return stmt.all(searchPattern, searchPattern, searchPattern, limit);
+  async searchMultiplayerSessions(searchTerm, limit = 20) {
+    if (this.sqlite) return this.sqlite.searchMultiplayerSessions(searchTerm, limit);
+    const pattern = `%${searchTerm}%`;
+    const { rows } = await this.pg.query(
+      `SELECT DISTINCT ms.*,
+        (SELECT COUNT(*)::int FROM multiplayer_messages mm WHERE mm.session_id = ms.session_id) AS message_count
+       FROM multiplayer_sessions ms
+       JOIN multiplayer_messages mm ON ms.session_id = mm.session_id
+       WHERE ms.title ILIKE $1 OR mm.content ILIKE $2 OR ms.session_id ILIKE $3
+       ORDER BY ms.updated_at DESC LIMIT $4`,
+      [pattern, pattern, pattern, limit]
+    );
+    return rows.map((r) => this._normalizeSessionRow(r));
   }
 
-  // Multiplayer statistics
-  getMultiplayerStats() {
-    const stmt = this.db.prepare(`
+  async getMultiplayerStats() {
+    if (this.sqlite) return this.sqlite.getMultiplayerStats();
+    const { rows } = await this.pg.query(`
       SELECT 
-        COUNT(*) as total_sessions,
-        COUNT(CASE WHEN is_active = 1 THEN 1 END) as active_sessions,
-        COUNT(CASE WHEN DATE(created_at) = DATE('now') THEN 1 END) as sessions_today,
-        COUNT(CASE WHEN DATE(created_at) = DATE('now', '-1 day') THEN 1 END) as sessions_yesterday,
-        AVG(participant_count) as avg_participants
-      FROM multiplayer_sessions
-    `);
-    return stmt.get();
+        COUNT(*)::bigint AS total_sessions,
+        COUNT(*) FILTER (WHERE is_active)::bigint AS active_sessions,
+        COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE)::bigint AS sessions_today,
+        COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE - 1)::bigint AS sessions_yesterday,
+        AVG(participant_count)::float AS avg_participants
+      FROM multiplayer_sessions`);
+    return rows[0];
   }
 
-  getMultiplayerMessageStats() {
-    const stmt = this.db.prepare(`
+  async getMultiplayerMessageStats() {
+    if (this.sqlite) return this.sqlite.getMultiplayerMessageStats();
+    const { rows } = await this.pg.query(`
       SELECT 
-        COUNT(*) as total_messages,
-        COUNT(CASE WHEN message_type = 'chat' THEN 1 END) as chat_messages,
-        COUNT(CASE WHEN message_type = 'question' THEN 1 END) as question_messages,
-        COUNT(CASE WHEN message_type = 'answer' THEN 1 END) as answer_messages,
-        COUNT(CASE WHEN message_type = 'emoji' THEN 1 END) as emoji_messages,
-        COUNT(CASE WHEN DATE(timestamp) = DATE('now') THEN 1 END) as messages_today
-      FROM multiplayer_messages
-    `);
-    return stmt.get();
+        COUNT(*)::bigint AS total_messages,
+        COUNT(*) FILTER (WHERE message_type = 'chat')::bigint AS chat_messages,
+        COUNT(*) FILTER (WHERE message_type = 'question')::bigint AS question_messages,
+        COUNT(*) FILTER (WHERE message_type = 'answer')::bigint AS answer_messages,
+        COUNT(*) FILTER (WHERE message_type = 'emoji')::bigint AS emoji_messages,
+        COUNT(*) FILTER (WHERE ("timestamp")::date = CURRENT_DATE)::bigint AS messages_today
+      FROM multiplayer_messages`);
+    return rows[0];
   }
 
-  // Export multiplayer session
-  exportMultiplayerSession(sessionId) {
-    const session = this.getMultiplayerSession(sessionId);
+  async exportMultiplayerSession(sessionId) {
+    if (this.sqlite) return this.sqlite.exportMultiplayerSession(sessionId);
+    const session = await this.getMultiplayerSession(sessionId);
     if (!session) return null;
-
-    const messages = this.getMultiplayerMessages(sessionId);
-    
+    const messages = await this.getMultiplayerMessages(sessionId);
     return {
       session: {
         id: session.id,
@@ -457,131 +356,121 @@ class DatabaseManager {
         participant_count: session.participant_count,
         created_at: session.created_at,
         updated_at: session.updated_at,
-        last_activity: session.last_activity
+        last_activity: session.last_activity,
       },
-      messages: messages.map(msg => ({
+      messages: messages.map((msg) => ({
         id: msg.id,
         sender: msg.sender,
         content: msg.content,
         message_type: msg.message_type,
         question_number: msg.question_number,
-        timestamp: msg.timestamp
-      }))
+        timestamp: msg.timestamp,
+      })),
     };
   }
 
-  // Conversation listing and search
-  getConversations(companionId = null, limit = 20, offset = 0) {
-    let query = `
-      SELECT c.*, comp.name as companion_name,
-             (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as message_count,
-             (SELECT content FROM messages WHERE conversation_id = c.id ORDER BY timestamp DESC LIMIT 1) as last_message
-      FROM conversations c
-      JOIN companions comp ON c.companion_id = comp.id
-    `;
-    
+  async getConversations(companionId = null, limit = 20, offset = 0) {
+    if (this.sqlite) return this.sqlite.getConversations(companionId, limit, offset);
+    let q = `
+      SELECT c.*, comp.name AS companion_name,
+        (SELECT COUNT(*)::int FROM messages m WHERE m.conversation_id = c.id) AS message_count,
+        (SELECT content FROM messages m2 WHERE m2.conversation_id = c.id ORDER BY m2.timestamp DESC LIMIT 1) AS last_message
+      FROM conversations c JOIN companions comp ON c.companion_id = comp.id`;
     const params = [];
     if (companionId) {
-      query += ' WHERE c.companion_id = ?';
+      q += ' WHERE c.companion_id = $1';
       params.push(companionId);
     }
-    
-    query += ' ORDER BY c.updated_at DESC LIMIT ? OFFSET ?';
+    q += ` ORDER BY c.updated_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(limit, offset);
-    
-    const stmt = this.db.prepare(query);
-    return stmt.all(...params);
+    const { rows } = await this.pg.query(q, params);
+    return rows.map((r) => this._normalizeSessionRow(r));
   }
 
-  searchConversations(searchTerm, limit = 20) {
-    const stmt = this.db.prepare(`
-      SELECT DISTINCT c.*, comp.name as companion_name,
-             (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) as message_count
-      FROM conversations c
-      JOIN companions comp ON c.companion_id = comp.id
-      JOIN messages m ON c.id = m.conversation_id
-      WHERE c.title LIKE ? OR m.content LIKE ? OR comp.name LIKE ?
-      ORDER BY c.updated_at DESC
-      LIMIT ?
-    `);
-    
-    const searchPattern = `%${searchTerm}%`;
-    return stmt.all(searchPattern, searchPattern, searchPattern, limit);
+  async searchConversations(searchTerm, limit = 20) {
+    if (this.sqlite) return this.sqlite.searchConversations(searchTerm, limit);
+    const pattern = `%${searchTerm}%`;
+    const { rows } = await this.pg.query(
+      `SELECT DISTINCT c.*, comp.name AS companion_name,
+        (SELECT COUNT(*)::int FROM messages m WHERE m.conversation_id = c.id) AS message_count
+       FROM conversations c
+       JOIN companions comp ON c.companion_id = comp.id
+       JOIN messages m ON c.id = m.conversation_id
+       WHERE c.title ILIKE $1 OR m.content ILIKE $2 OR comp.name ILIKE $3
+       ORDER BY c.updated_at DESC LIMIT $4`,
+      [pattern, pattern, pattern, limit]
+    );
+    return rows.map((r) => this._normalizeSessionRow(r));
   }
 
-  // Statistics and analytics
-  getConversationStats() {
-    const stmt = this.db.prepare(`
+  async getConversationStats() {
+    if (this.sqlite) return this.sqlite.getConversationStats();
+    const { rows } = await this.pg.query(`
       SELECT 
-        COUNT(*) as total_conversations,
-        COUNT(CASE WHEN is_active = 1 THEN 1 END) as active_conversations,
-        COUNT(CASE WHEN DATE(created_at) = DATE('now') THEN 1 END) as conversations_today,
-        COUNT(CASE WHEN DATE(created_at) = DATE('now', '-1 day') THEN 1 END) as conversations_yesterday
-      FROM conversations
-    `);
-    return stmt.get();
+        COUNT(*)::bigint AS total_conversations,
+        COUNT(*) FILTER (WHERE is_active)::bigint AS active_conversations,
+        COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE)::bigint AS conversations_today,
+        COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE - 1)::bigint AS conversations_yesterday
+      FROM conversations`);
+    return rows[0];
   }
 
-  getMessageStats() {
-    const stmt = this.db.prepare(`
+  async getMessageStats() {
+    if (this.sqlite) return this.sqlite.getMessageStats();
+    const { rows } = await this.pg.query(`
       SELECT 
-        COUNT(*) as total_messages,
-        COUNT(CASE WHEN sender = 'user' THEN 1 END) as user_messages,
-        COUNT(CASE WHEN sender = 'ai' THEN 1 END) as ai_messages,
-        COUNT(CASE WHEN DATE(timestamp) = DATE('now') THEN 1 END) as messages_today
-      FROM messages
-    `);
-    return stmt.get();
+        COUNT(*)::bigint AS total_messages,
+        COUNT(*) FILTER (WHERE sender = 'user')::bigint AS user_messages,
+        COUNT(*) FILTER (WHERE sender = 'ai')::bigint AS ai_messages,
+        COUNT(*) FILTER (WHERE ("timestamp")::date = CURRENT_DATE)::bigint AS messages_today
+      FROM messages`);
+    return rows[0];
   }
 
-  getCompanionStats() {
-    const stmt = this.db.prepare(`
-      SELECT 
-        comp.name,
-        COUNT(c.id) as conversation_count,
-        COUNT(m.id) as message_count,
-        MAX(c.updated_at) as last_activity
+  async getCompanionStats() {
+    if (this.sqlite) return this.sqlite.getCompanionStats();
+    const { rows } = await this.pg.query(`
+      SELECT comp.name,
+        COUNT(DISTINCT c.id)::bigint AS conversation_count,
+        COUNT(m.id)::bigint AS message_count,
+        MAX(c.updated_at) AS last_activity
       FROM companions comp
       LEFT JOIN conversations c ON comp.id = c.companion_id
       LEFT JOIN messages m ON c.id = m.conversation_id
-      GROUP BY comp.id
-      ORDER BY message_count DESC
-    `);
-    return stmt.all();
+      GROUP BY comp.id, comp.name
+      ORDER BY message_count DESC`);
+    return rows;
   }
 
-  // Cleanup and maintenance
-  cleanupOldConversations(daysOld = 30) {
-    const stmt = this.db.prepare(`
-      DELETE FROM conversations 
-      WHERE updated_at < DATE('now', '-${daysOld} days') 
-      AND is_active = 0
-    `);
-    return stmt.run();
+  async cleanupOldConversations(daysOld = 30) {
+    if (this.sqlite) return this.sqlite.cleanupOldConversations(daysOld);
+    const { rowCount } = await this.pg.query(
+      `DELETE FROM conversations WHERE updated_at < NOW() - ($1::int * INTERVAL '1 day') AND is_active = FALSE`,
+      [daysOld]
+    );
+    return { changes: rowCount };
   }
 
-  cleanupOldMultiplayerSessions(daysOld = 30) {
-    const stmt = this.db.prepare(`
-      DELETE FROM multiplayer_sessions 
-      WHERE updated_at < DATE('now', '-${daysOld} days') 
-      AND is_active = 0
-    `);
-    return stmt.run();
+  async cleanupOldMultiplayerSessions(daysOld = 30) {
+    if (this.sqlite) return this.sqlite.cleanupOldMultiplayerSessions(daysOld);
+    const { rowCount } = await this.pg.query(
+      `DELETE FROM multiplayer_sessions WHERE updated_at < NOW() - ($1::int * INTERVAL '1 day') AND is_active = FALSE`,
+      [daysOld]
+    );
+    return { changes: rowCount };
   }
 
-  getDatabaseSize() {
-    const stmt = this.db.prepare("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()");
-    const result = stmt.get();
-    return result.size;
+  async getDatabaseSize() {
+    if (this.sqlite) return this.sqlite.getDatabaseSize();
+    const { rows } = await this.pg.query('SELECT pg_database_size(current_database())::bigint AS size');
+    return Number(rows[0].size);
   }
 
-  // Backup and export
-  exportConversation(conversationId) {
-    const conversation = this.getConversationById(conversationId);
+  async exportConversation(conversationId) {
+    if (this.sqlite) return this.sqlite.exportConversation(conversationId);
+    const conversation = await this.getConversationById(conversationId);
     if (!conversation) return null;
-
-    const messages = this.getMessages(conversationId);
-    
+    const messages = await this.getMessages(conversationId);
     return {
       conversation: {
         id: conversation.id,
@@ -594,63 +483,63 @@ class DatabaseManager {
           personality: conversation.personality,
           identity: conversation.identity,
           gender: conversation.gender,
-          role: conversation.role
-        }
+          role: conversation.role,
+        },
       },
-      messages: messages.map(msg => ({
+      messages: messages.map((msg) => ({
         id: msg.id,
         sender: msg.sender,
         content: msg.content,
         emotion: msg.emotion,
-        timestamp: msg.timestamp
-      }))
+        timestamp: msg.timestamp,
+      })),
     };
   }
 
-  // User management methods
-  createUser(userId, username, email, passwordHash) {
+  async createUser(userId, username, email, passwordHash) {
+    if (this.sqlite) return this.sqlite.createUser(userId, username, email, passwordHash);
     try {
-      const stmt = this.db.prepare(`
-        INSERT INTO users (id, username, email, password_hash, created_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
-      `);
-      stmt.run(userId, username, email, passwordHash);
+      await this.pg.query(
+        `INSERT INTO users (id, username, email, password_hash, created_at) VALUES ($1,$2,$3,$4,NOW())`,
+        [userId, username, email, passwordHash]
+      );
       return { id: userId, username, email, createdAt: new Date() };
-    } catch (error) {
-      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-        throw new Error('Username or email already exists');
-      }
-      throw error;
+    } catch (e) {
+      if (e.code === '23505') throw new Error('Username or email already exists');
+      throw e;
     }
   }
 
-  getUserByUsername(username) {
-    const stmt = this.db.prepare('SELECT * FROM users WHERE username = ?');
-    return stmt.get(username) || null;
+  async getUserByUsername(username) {
+    if (this.sqlite) return this.sqlite.getUserByUsername(username);
+    const { rows } = await this.pg.query('SELECT * FROM users WHERE username = $1', [username]);
+    return rows[0] || null;
   }
 
-  getUserByEmail(email) {
-    const stmt = this.db.prepare('SELECT * FROM users WHERE email = ?');
-    return stmt.get(email) || null;
+  async getUserByEmail(email) {
+    if (this.sqlite) return this.sqlite.getUserByEmail(email);
+    const { rows } = await this.pg.query('SELECT * FROM users WHERE email = $1', [email]);
+    return rows[0] || null;
   }
 
-  getUserById(userId) {
-    const stmt = this.db.prepare('SELECT * FROM users WHERE id = ?');
-    return stmt.get(userId) || null;
+  async getUserById(userId) {
+    if (this.sqlite) return this.sqlite.getUserById(userId);
+    const { rows } = await this.pg.query('SELECT * FROM users WHERE id = $1', [userId]);
+    return rows[0] || null;
   }
 
-  updateUserLastLogin(userId) {
-    const stmt = this.db.prepare('UPDATE users SET last_login = datetime("now") WHERE id = ?');
-    stmt.run(userId);
+  async updateUserLastLogin(userId) {
+    if (this.sqlite) return this.sqlite.updateUserLastLogin(userId);
+    await this.pg.query('UPDATE users SET last_login = NOW() WHERE id = $1', [userId]);
   }
 
-  // Close database connection
-  close() {
-    if (this.db) {
-      this.db.close();
-      console.log('🔒 Database connection closed');
+  async close() {
+    if (this.pg) {
+      await this.pg.end();
+      console.log('🔒 PostgreSQL pool closed');
+    }
+    if (this.sqlite) {
+      this.sqlite.close();
     }
   }
 }
-
-export default DatabaseManager;

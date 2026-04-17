@@ -1,11 +1,7 @@
-// API Configuration
-// Use VITE_API_BASE_URL if set, otherwise use production URL in production mode, or localhost in development
-// @ts-ignore - Vite environment variables are available at runtime
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 
-  // @ts-ignore
-  (import.meta.env.PROD 
-  ? 'https://lover-0ekx.onrender.com' // Use Render backend in production
-    : 'http://localhost:4000'); // Use localhost in development
+// API Configuration — self-hosted VM / local; see src/config/site.ts
+import { getApiBaseUrl } from "./site";
+
+const API_BASE = getApiBaseUrl();
 
 export const API_ENDPOINTS = {
   // AI Companion

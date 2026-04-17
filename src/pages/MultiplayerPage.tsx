@@ -14,8 +14,18 @@ import TruthOrDareSpinner from "@/components/TruthOrDareSpinner";
 import { useAuth } from "@/hooks/useAuth";
 import { SocketMessage } from "@/types/socket";
 import logger from "@/lib/logger";
+import { jsonAuthHeaders } from "@/lib/auth-headers";
 import API_ENDPOINTS from "@/config/api";
+import { getSocketUrl, getOnboardingUrl } from "@/config/site";
 import { toast } from "sonner";
+
+/** Row from GET /api/multiplayer/sessions (enriched list). */
+interface ListedMultiplayerSession {
+  session_id: string;
+  title?: string | null;
+  currentParticipants?: number;
+  created_at?: string;
+}
 
 const MultiplayerPage = () => {
   const navigate = useNavigate();
@@ -45,7 +55,7 @@ const MultiplayerPage = () => {
   const [showSessionBrowser, setShowSessionBrowser] = useState(false);
   const [showCreateNamedSession, setShowCreateNamedSession] = useState(false);
   const [sessionTitle, setSessionTitle] = useState("");
-  const [availableSessions, setAvailableSessions] = useState<any[]>([]);
+  const [availableSessions, setAvailableSessions] = useState<ListedMultiplayerSession[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -544,7 +554,7 @@ const MultiplayerPage = () => {
   useEffect(() => {
     if (isInSession && sessionId && sessionId.trim()) {
       const trimmedSessionId = sessionId.trim();
-      const socketUrl = import.meta.env.VITE_SOCKET_URL || "wss://lover-0ekx.onrender.com";
+      const socketUrl = getSocketUrl();
       
       // Clean up any existing socket connection
       if (socketRef.current) {
@@ -559,20 +569,28 @@ const MultiplayerPage = () => {
       const socket = io(socketUrl, {
         reconnection: true,
         reconnectionDelay: 1000,
-        reconnectionDelayMax: 10000, // Increased for Render's slower responses
-        reconnectionAttempts: Infinity, // Keep trying to reconnect
-        timeout: 20000, // 20 seconds timeout for connection
-        // Match server ping settings
+        reconnectionDelayMax: 15000,
+        reconnectionAttempts: Infinity,
+        timeout: 20000,
         transports: ['websocket', 'polling'],
         upgrade: true,
         rememberUpgrade: true,
-        // Better handling for Render's load balancer
         forceNew: false,
-        multiplex: true,
-        timeout: 20000,
-        transports: ['websocket', 'polling']
+        // Matches backend/server.js — recover missed packets after brief disconnects (still not magic for long outages)
+        connectionStateRecovery: {
+          maxDisconnectionDuration: 2 * 60 * 1000,
+        },
       });
       socketRef.current = socket;
+
+      const nudgeReconnect = () => {
+        if (socket.disconnected) socket.connect();
+      };
+      window.addEventListener("online", nudgeReconnect);
+      const onVisibility = () => {
+        if (document.visibilityState === "visible") nudgeReconnect();
+      };
+      document.addEventListener("visibilitychange", onVisibility);
 
       socket.on("connect", () => {
         setIsConnected(true);
@@ -588,7 +606,7 @@ const MultiplayerPage = () => {
 
       socket.on("disconnect", (reason) => {
         setIsConnected(false);
-        setConnectionStatus("Disconnected");
+        setConnectionStatus("Reconnecting…");
         logger.log("Disconnected from server:", reason);
         
         // Only show error if it's not a normal disconnection
@@ -635,15 +653,14 @@ const MultiplayerPage = () => {
       });
 
       // Handle server ping to keep connection alive
-      socket.on("ping", (data) => {
-        // Respond to server ping to keep connection alive
+      socket.on("ping", () => {
         socket.emit("pong", { timestamp: Date.now() });
       });
 
       socket.on("connect_error", (error) => {
         setIsConnected(false);
         setConnectionStatus("Connection failed");
-        console.error("Connection error:", error);
+        logger.error("Connection error:", error);
         logger.error("Socket connection failed:", error);
         
         // Add user-friendly error message
@@ -655,7 +672,7 @@ const MultiplayerPage = () => {
       });
 
       socket.on("error", (error) => {
-        console.error("Socket error:", error);
+        logger.error("Socket error:", error);
         logger.error("Socket error:", error);
         setMessages((prev) => [...prev, {
           text: "❌ Connection error occurred. Please refresh the page.",
@@ -668,7 +685,7 @@ const MultiplayerPage = () => {
       socket.on("chat-history", (data: {sessionId: string, messages: Array<{text: string, sender: string, timestamp: string, playerName?: string, type?: string, imageData?: string, imageUrl?: string}>}) => {
         if (data.sessionId === trimmedSessionId && data.messages && data.messages.length > 0) {
           logger.log(`Loading ${data.messages.length} previous messages`);
-          const historyMessages: SocketMessage[] = data.messages.map((msg, idx) => ({
+          const historyMessages: SocketMessage[] = data.messages.map((msg) => ({
             text: msg.text,
             sender: msg.playerName || msg.sender,
             timestamp: new Date(msg.timestamp),
@@ -751,7 +768,7 @@ const MultiplayerPage = () => {
         setMessages((prev) => {
           // Check for exact ID match first (fastest)
           if (prev.some(m => m.id === messageId)) {
-            console.log('🚫 Duplicate message detected (ID match):', messageId);
+            logger.log('🚫 Duplicate message detected (ID match):', messageId);
             return prev;
           }
           
@@ -770,7 +787,7 @@ const MultiplayerPage = () => {
           });
           
           if (isDuplicate) {
-            console.log('🚫 Duplicate message detected (content match):', { sender: msgSender, text: msgText.substring(0, 20) });
+            logger.log('🚫 Duplicate message detected (content match):', { sender: msgSender, text: msgText.substring(0, 20) });
             return prev;
           }
           
@@ -819,6 +836,8 @@ const MultiplayerPage = () => {
       });
 
       return () => {
+        window.removeEventListener("online", nudgeReconnect);
+        document.removeEventListener("visibilitychange", onVisibility);
         if (socket) {
           socket.removeAllListeners();
           socket.disconnect();
@@ -865,7 +884,7 @@ const MultiplayerPage = () => {
         toast.success('Session created!');
       }
     } catch (error) {
-      console.error('Error creating session:', error);
+      logger.error('Error creating session:', error);
       toast.error('Failed to create session. Please try again.');
       setIsCreatingSession(false);
     }
@@ -903,7 +922,7 @@ const MultiplayerPage = () => {
         toast.success('Joining session...');
       }
     } catch (error) {
-      console.error('Error joining session:', error);
+      logger.error('Error joining session:', error);
       toast.error('Failed to join session. Please try again.');
       setIsJoiningSession(false);
     }
@@ -1036,7 +1055,7 @@ const MultiplayerPage = () => {
         await new Promise(resolve => setTimeout(resolve, 100));
         setIsSendingMessage(false);
       } catch (error) {
-        console.error('Error sending message:', error);
+        logger.error('Error sending message:', error);
         toast.error('Failed to send message. Please try again.');
         setIsSendingMessage(false);
       }
@@ -1096,7 +1115,7 @@ const MultiplayerPage = () => {
   const loadAvailableSessions = async () => {
     setIsLoadingSessions(true);
     try {
-      const response = await fetch(`${API_ENDPOINTS.MULTIPLAYER_SESSIONS}?activeOnly=true&limit=20`);
+      const response = await fetch(`${API_ENDPOINTS.MULTIPLAYER_SESSIONS}?activeOnly=true&limit=20`, { headers: jsonAuthHeaders() });
       if (response.ok) {
         const data = await response.json();
         setAvailableSessions(data.sessions || []);
@@ -1109,7 +1128,7 @@ const MultiplayerPage = () => {
         setAvailableSessions([]);
       }
     } catch (error) {
-      console.error('Error loading sessions:', error);
+      logger.error('Error loading sessions:', error);
       toast.error('Failed to load sessions. Please check your connection and try again.');
       setAvailableSessions([]);
     } finally {
@@ -1127,9 +1146,7 @@ const MultiplayerPage = () => {
     try {
       const response = await fetch(API_ENDPOINTS.MULTIPLAYER_SESSIONS, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: jsonAuthHeaders(),
         body: JSON.stringify({ title: sessionTitle.trim() }),
       });
 
@@ -1155,7 +1172,7 @@ const MultiplayerPage = () => {
         toast.error(errorData.error || 'Failed to create session');
       }
     } catch (error) {
-      console.error('Error creating named session:', error);
+      logger.error('Error creating named session:', error);
       toast.error('Failed to create session. Please check your connection and try again.');
     } finally {
       setIsCreatingSession(false);
@@ -1373,7 +1390,7 @@ const MultiplayerPage = () => {
                   <div className="grid grid-cols-1 gap-2">
                     <Button
                       onClick={() => {
-                        const onboardingUrl = 'https://lover-livid.vercel.app/onboarding';
+                        const onboardingUrl = getOnboardingUrl();
                         const message = encodeURIComponent(`🎉 Join me on Lover's Code!\n\nSession code: ${sessionId}\n\n📱 How to join:\n\n✨ NEW USERS:\n1. Go to: ${onboardingUrl}\n2. Click "Sign Up" to create your free account\n3. Choose a username, enter your email, and create a password\n4. Once logged in, navigate to Multiplayer\n5. Click "Join Session" and enter the session code: ${sessionId}\n6. Start chatting! 💕\n\n👋 EXISTING USERS:\n1. Go to: ${onboardingUrl}\n2. Click "Sign In" and enter your credentials\n3. Navigate to Multiplayer\n4. Click "Join Session" and enter the session code: ${sessionId}\n5. Start chatting! 💕\n\nLet's connect and have fun together! 🎉`);
                         window.open(`https://wa.me/?text=${message}`, '_blank');
                       }}
@@ -1387,7 +1404,7 @@ const MultiplayerPage = () => {
                     
                     <Button
                       onClick={() => {
-                        const onboardingUrl = 'https://lover-livid.vercel.app/onboarding';
+                        const onboardingUrl = getOnboardingUrl();
                         const message = `🎉 Join me on Lover's Code!
 
 Session code: ${sessionId}
@@ -1428,7 +1445,7 @@ Let's connect and have fun together! 🎉`;
                     
                     <Button
                       onClick={() => {
-                        const onboardingUrl = 'https://lover-livid.vercel.app/onboarding';
+                        const onboardingUrl = getOnboardingUrl();
                         const message = encodeURIComponent(`🎉 Join me on Lover's Code!\n\nSession code: ${sessionId}\n\n📱 How to join:\n\n✨ NEW USERS:\n1. Go to: ${onboardingUrl}\n2. Click "Sign Up" to create your free account\n3. Choose a username, enter your email, and create a password\n4. Once logged in, navigate to Multiplayer\n5. Click "Join Session" and enter the session code: ${sessionId}\n6. Start chatting! 💕\n\n👋 EXISTING USERS:\n1. Go to: ${onboardingUrl}\n2. Click "Sign In" and enter your credentials\n3. Navigate to Multiplayer\n4. Click "Join Session" and enter the session code: ${sessionId}\n5. Start chatting! 💕\n\nLet's connect and have fun together! 🎉`);
                         window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(onboardingUrl)}&quote=${message}`, '_blank');
                       }}
@@ -1852,7 +1869,7 @@ Let's connect and have fun together! 🎉`;
                 <p className="text-sm text-gray-500 dark:text-gray-500 mt-1">Create a new session to get started!</p>
               </div>
             ) : (
-              availableSessions.map((session: any) => (
+              availableSessions.map((session) => (
                 <div
                   key={session.session_id}
                   className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors cursor-pointer"
