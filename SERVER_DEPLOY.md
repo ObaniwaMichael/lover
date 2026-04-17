@@ -26,6 +26,55 @@ Optional process manager:
 sudo npm install -g pm2
 ```
 
+### PostgreSQL (if you want Postgres instead of SQLite)
+
+Keep Postgres **localhost-only**: do **not** add TCP **5432** to your cloud firewall; the Node app connects to `127.0.0.1`.
+
+**Oracle Linux 8/9**
+
+```sh
+sudo dnf install -y postgresql-server postgresql-contrib
+sudo postgresql-setup --initdb
+sudo systemctl enable --now postgresql
+```
+
+**Ubuntu**
+
+```sh
+sudo apt update
+sudo apt install -y postgresql postgresql-contrib
+sudo systemctl enable --now postgresql
+```
+
+Create a database and user (pick a strong password; use only safe characters or percent-encode the password in `DATABASE_URL`):
+
+```sh
+sudo -u postgres psql -c "CREATE USER lover_app WITH PASSWORD 'REPLACE_WITH_STRONG_PASSWORD';"
+sudo -u postgres psql -c "CREATE DATABASE lover OWNER lover_app;"
+```
+
+Allow password auth from the loopback interface (needed for `postgres://...@127.0.0.1:5432/...`). Edit `pg_hba.conf` (path varies, e.g. `/var/lib/pgsql/data/pg_hba.conf` on Oracle Linux, `/etc/postgresql/*/main/pg_hba.conf` on Ubuntu) and ensure a line like:
+
+```
+host    all    all    127.0.0.1/32    scram-sha-256
+```
+
+Then:
+
+```sh
+# Oracle Linux example — adjust path if `sudo -u postgres psql -c 'SHOW hba_file;'` differs
+sudo systemctl restart postgresql
+# Ubuntu: sudo systemctl restart postgresql
+```
+
+In `backend/.env` set:
+
+```env
+DATABASE_URL=postgres://lover_app:REPLACE_WITH_STRONG_PASSWORD@127.0.0.1:5432/lover
+```
+
+The app creates tables on startup. If the connection fails, Node falls back to SQLite (check logs).
+
 ## 3. Put the code on the server
 
 **Option A — Git (recommended for updates)**
@@ -69,7 +118,7 @@ Set at least:
 
 **DuckDNS + this project:** Point `loverscode.duckdns.org` (your host) at your VM’s public IP (e.g. `102.88.108.231`). Wait for DNS, then use that hostname in `CORS_ORIGIN` and nginx `server_name`.
 
-Add `DATABASE_URL` if you use PostgreSQL; otherwise SQLite is used under `backend/data/`.
+Add `DATABASE_URL` if you use PostgreSQL (see **PostgreSQL** under step 2); omit it to use SQLite under `backend/data/`.
 
 ```sh
 npm install
@@ -202,11 +251,45 @@ Backend `CORS_ORIGIN` must be the **SPA** origin (e.g. `https://app.your-domain.
 
 ---
 
+## Troubleshooting (PM2 / `ERR_MODULE_NOT_FOUND` / `ipKeyGenerator`)
+
+**`Cannot find package 'compression'` or `better-sqlite3'`**  
+Dependencies must be installed **inside `backend/`** (that is where `package.json` for the API lives):
+
+```bash
+cd /path/to/lover/backend
+npm install
+pm2 restart lover-api
+```
+
+If it still fails, clean install:
+
+```bash
+cd /path/to/lover/backend
+rm -rf node_modules
+npm install
+pm2 restart lover-api
+```
+
+**`does not provide an export named 'ipKeyGenerator'`**  
+Your tree is an **old** `server.js`. Pull latest `main`, then reinstall as above. Current code uses a local `makeRateLimitKey()` and does not import `ipKeyGenerator`.
+
+**`ECONNREFUSED 127.0.0.1:5432` / PostgreSQL unavailable**  
+`DATABASE_URL` points at Postgres but nothing is listening. Either:
+
+- **Use SQLite (simplest):** comment out or remove `DATABASE_URL` in `backend/.env`, restart PM2, or  
+- **Run Postgres** for real and fix the URL/user/password.
+
+**Wrong `NODE_ENV` / CORS in logs**  
+Set `NODE_ENV=production` and `CORS_ORIGIN=https://loverscode.duckdns.org` (your real URL) in `backend/.env`, then `pm2 restart lover-api --update-env`.
+
+---
+
 ## Round-up checklist (`loverscode.duckdns.org`)
 
 1. **DuckDNS:** Host points to your VM IP; `ping loverscode.duckdns.org` returns that IP.  
 2. **Firewall:** TCP **80**, **443**, **22** allowed as needed.  
-3. **`backend/.env`:** `NODE_ENV=production`, `HOST=0.0.0.0`, `PORT=4000`, `CORS_ORIGIN=https://loverscode.duckdns.org`, `TRUST_PROXY=1`, secrets set.  
+3. **`backend/.env`:** `NODE_ENV=production`, `HOST=0.0.0.0`, `PORT=4000`, `CORS_ORIGIN=https://loverscode.duckdns.org`, `TRUST_PROXY=1`, secrets set; optional **`DATABASE_URL`** if you installed Postgres (step 2).  
 4. **Backend deps:** `cd backend && npm install` (then PM2 as above).  
 5. **Frontend:** Root `.env` with `VITE_PUBLIC_APP_URL=https://loverscode.duckdns.org` if the app needs a stable public URL; `npm run build`.  
 6. **nginx:** `server_name` + TLS; `proxy_set_header X-Forwarded-Proto $scheme`.  

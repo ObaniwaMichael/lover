@@ -58,7 +58,7 @@ npm run dev:backend
 | `PORT` | Listen port (default `4000`) |
 | `CORS_ORIGIN` | **Production:** HTTPS (or HTTP) origin of the SPA, e.g. `https://your-vm.example.com` — required for browser API access |
 | `TRUST_PROXY` | Set to `0` if Node listens directly (no reverse proxy); default trusts one proxy hop for correct client IPs |
-| `DATABASE_URL` | If set, uses PostgreSQL; otherwise SQLite under `backend/data/` |
+| `DATABASE_URL` | If set, uses PostgreSQL; otherwise SQLite under `backend/data/`. Local pattern: `postgres://USER:PASSWORD@127.0.0.1:5432/lover` — create DB `lover` first; see `backend/.env.example` for notes and password encoding. |
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` | Supabase-backed auth and multiplayer when configured |
 | `MAINTENANCE_SECRET` | **Production:** required for `/api/maintenance/*`; send header `X-Maintenance-Key` with the same value. Without it, those routes return **503**. In development, unset = maintenance routes allowed (see warning in logs). |
 

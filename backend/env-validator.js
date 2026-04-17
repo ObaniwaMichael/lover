@@ -45,7 +45,17 @@ const validateEnvironment = () => {
 
   optional.forEach((key) => {
     if (process.env[key]) {
-      const hiddenKeys = ['MONGODB_URI', 'SUPABASE_URL', 'SUPABASE_ANON_KEY', 'MAINTENANCE_SECRET', 'GEMINI_API_KEY', 'GEMINI_API_KEY_2', 'GEMINI_SECONDARY_API_KEY', 'gemini_api_key_1'];
+      const hiddenKeys = [
+        'MONGODB_URI',
+        'DATABASE_URL',
+        'SUPABASE_URL',
+        'SUPABASE_ANON_KEY',
+        'MAINTENANCE_SECRET',
+        'GEMINI_API_KEY',
+        'GEMINI_API_KEY_2',
+        'GEMINI_SECONDARY_API_KEY',
+        'gemini_api_key_1',
+      ];
       console.log(`  ${key}: ${hiddenKeys.includes(key) ? '***hidden***' : process.env[key]}`);
     }
   });

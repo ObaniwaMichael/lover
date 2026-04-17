@@ -96,9 +96,22 @@ app.use(helmet({
 
 // CORS must run before /api rate limiters: otherwise OPTIONS preflight can get 429/other
 // responses without Access-Control-* headers and the browser reports a CORS failure.
+/** Fix typos like `http:http://host` from mis-edited .env files */
+function fixDoubleSchemeOrigin(raw) {
+  const s = raw.trim();
+  if (/^http:http:\/\//i.test(s)) return s.replace(/^http:/i, '');
+  if (/^https:https:\/\//i.test(s)) return s.replace(/^https:/i, '');
+  if (/^http:https:\/\//i.test(s)) return s.replace(/^http:/i, '');
+  return s;
+}
+
 const buildAllowedOrigins = () => {
   if (process.env.NODE_ENV === 'production') {
-    const corsOrigin = (CORS_ORIGIN || '').trim();
+    const rawCors = (CORS_ORIGIN || '').trim();
+    const corsOrigin = fixDoubleSchemeOrigin(CORS_ORIGIN || '');
+    if (rawCors && rawCors !== corsOrigin) {
+      console.warn(`⚠️ CORS_ORIGIN looked malformed; normalized to: ${corsOrigin}`);
+    }
     const normalized = corsOrigin.endsWith('/') ? corsOrigin.slice(0, -1) : corsOrigin;
     if (!normalized) {
       console.warn(
