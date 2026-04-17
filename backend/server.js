@@ -7,7 +7,7 @@ import { Server as SocketIOServer } from 'socket.io';
 import http from 'http';
 import dotenv from 'dotenv';
 import helmet from 'helmet';
-import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import rateLimit from 'express-rate-limit';
 import slowDown from 'express-slow-down';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -191,6 +191,17 @@ app.use(
 const skipHealthAndMetrics = (req) =>
   req.path === '/health' || req.path === '/metrics';
 
+/**
+ * Rate-limit key: IP + User-Agent. Defined here so a mismatched hoisted
+ * `express-rate-limit` version (e.g. running `node backend/server.js` from repo root)
+ * cannot break on missing `ipKeyGenerator` export.
+ */
+function makeRateLimitKey(req) {
+  const ip = req.ip ?? req.socket?.remoteAddress ?? '127.0.0.1';
+  const ua = req.headers['user-agent'] || 'unknown';
+  return `${ip}:${ua}`;
+}
+
 // Rate limiting with improved configuration
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -204,10 +215,7 @@ const limiter = rateLimit({
   skipSuccessfulRequests: false,
   skipFailedRequests: false,
   skip: skipHealthAndMetrics,
-  keyGenerator: (req) =>
-    ipKeyGenerator(req.ip ?? '127.0.0.1') +
-    ':' +
-    (req.headers['user-agent'] || 'unknown'),
+  keyGenerator: (req) => makeRateLimitKey(req),
 });
 
 const aiLimiter = rateLimit({
@@ -221,10 +229,7 @@ const aiLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: false,
   skipFailedRequests: false,
-  keyGenerator: (req) =>
-    ipKeyGenerator(req.ip ?? '127.0.0.1') +
-    ':' +
-    (req.headers['user-agent'] || 'unknown'),
+  keyGenerator: (req) => makeRateLimitKey(req),
 });
 
 // Auth-specific rate limiting
@@ -237,10 +242,7 @@ const authLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) =>
-    ipKeyGenerator(req.ip ?? '127.0.0.1') +
-    ':' +
-    (req.headers['user-agent'] || 'unknown'),
+  keyGenerator: (req) => makeRateLimitKey(req),
 });
 
 // Speed limiting (built on express-rate-limit; supports `skip` in v2.1+)

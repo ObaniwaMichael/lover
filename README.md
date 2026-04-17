@@ -66,7 +66,7 @@ Never commit real `.env` files.
 
 ## Self-hosted VM (production)
 
-Step-by-step (Oracle Cloud / any Linux VM, Git or `scp`, nginx, pm2): **`SERVER_DEPLOY.md`**.
+Step-by-step (Oracle Cloud / any Linux VM, `loverscode.duckdns.org`, nginx, PM2): **`SERVER_DEPLOY.md`** (includes a **round-up checklist** at the bottom).
 
 Typical setup: **nginx** (or Caddy) terminates TLS and proxies `/` to static files from `npm run build`, `/api` and `/socket.io` to `node backend/server.js` on port **4000** so the browser uses **one origin**. Then leave `VITE_API_BASE_URL` unset in the built SPA; set backend **`CORS_ORIGIN`** to that same origin (e.g. `https://lovers.example.com`). If the API is on another host, set **`VITE_API_BASE_URL`** and **`CORS_ORIGIN`** to the SPA origin, **`VITE_SOCKET_URL`** to the API WebSocket base if needed, and **`VITE_PUBLIC_APP_URL`** for invite links.
 

@@ -1,9 +1,11 @@
+const { join } = require('path');
+
 /**
  * PM2 process file for Oracle Cloud / long-running VPS.
  *
  * Install: npm i -g pm2
- * Start:   pm2 start ecosystem.config.cjs
- * Logs:   pm2 logs lovers-backend
+ * Start (from `backend/`):   pm2 start ecosystem.config.cjs
+ * Logs:   pm2 logs lover-api
  *
  * Socket.IO in this app does not use Redis sticky sessions — use **instances: 1**
  * (fork). To scale horizontally, add @socket.io/redis-adapter and then raise instances.
@@ -17,7 +19,7 @@
 module.exports = {
   apps: [
     {
-      name: 'lovers-backend',
+      name: 'lover-api',
       cwd: __dirname,
       script: 'server.js',
       interpreter: 'node',
@@ -34,8 +36,8 @@ module.exports = {
       merge_logs: true,
       time: true,
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
-      error_file: './logs/pm2-error.log',
-      out_file: './logs/pm2-out.log',
+      error_file: join(__dirname, 'logs', 'pm2-error.log'),
+      out_file: join(__dirname, 'logs', 'pm2-out.log'),
       env: {
         NODE_ENV: 'production',
       },

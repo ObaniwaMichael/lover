@@ -64,7 +64,10 @@ Set at least:
 | `NODE_ENV` | `production` |
 | `HOST` | `0.0.0.0` |
 | `PORT` | `4000` |
-| `CORS_ORIGIN` | `https://your-domain.com` (exact SPA origin, no trailing slash mismatch) |
+| `CORS_ORIGIN` | **Must match the URL users open in the browser**, e.g. `https://loverscode.duckdns.org` (no trailing slash). After HTTPS, use `https://`, not `http://`. |
+| `TRUST_PROXY` | Set to `1` when **nginx** sits in front of Node (recommended) so rate limits and logs see the real client IP. |
+
+**DuckDNS + this project:** Point `loverscode.duckdns.org` (your host) at your VM’s public IP (e.g. `102.88.108.231`). Wait for DNS, then use that hostname in `CORS_ORIGIN` and nginx `server_name`.
 
 Add `DATABASE_URL` if you use PostgreSQL; otherwise SQLite is used under `backend/data/`.
 
@@ -72,20 +75,29 @@ Add `DATABASE_URL` if you use PostgreSQL; otherwise SQLite is used under `backen
 npm install
 ```
 
+### Native module `better-sqlite3`
+
+It must be compiled on the server. If `npm install` fails, install build tools on Oracle Linux: `sudo dnf install -y gcc gcc-c++ make python3`.
+
 Test once:
 
 ```sh
 node server.js
-# Ctrl+C after /health works
+# Ctrl+C after curl -s localhost:4000/health
 ```
 
-Run under **pm2** (survives logout, restarts on reboot with `pm2 startup`):
+Run under **PM2** from the **`backend/`** folder so `cwd` and `node_modules` are correct (avoids wrong `express-rate-limit` / `better-sqlite3` resolution when the repo root also has a `package.json`):
 
 ```sh
-cd /var/www/lover
-pm2 start backend/server.js --name lover-api
+cd /var/www/lover/backend
+mkdir -p logs
+pm2 delete lover-api 2>/dev/null   # only if an old misconfigured process exists
+pm2 start ecosystem.config.cjs
 pm2 save
+sudo env PATH=$PATH pm2 startup systemd -u "$USER" --hp "$HOME"   # follow the line it prints
 ```
+
+Do **not** rely on `pm2 start ../backend/server.js` from the repo root without setting `cwd` to `backend/`.
 
 ## 5. Frontend build
 
@@ -98,7 +110,8 @@ If the SPA is served **from the same host** as the API (via nginx), you usually 
 
 ```sh
 cp .env.example .env
-# Leave VITE_API_BASE_URL and VITE_SOCKET_URL empty for same-origin
+# Same host as nginx: leave VITE_API_BASE_URL and VITE_SOCKET_URL empty.
+# For invite / public links, set e.g. VITE_PUBLIC_APP_URL=https://loverscode.duckdns.org
 ```
 
 Build:
@@ -116,7 +129,7 @@ Create `/etc/nginx/conf.d/lover.conf` (or a `sites-available` snippet) — repla
 ```nginx
 server {
     listen 80;
-    server_name your-domain.com;
+    server_name loverscode.duckdns.org;
     root /var/www/lover/dist;
     index index.html;
 
@@ -158,7 +171,7 @@ Test and reload:
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Use **Let’s Encrypt** (`certbot --nginx`) or your CA for HTTPS, then set `CORS_ORIGIN` to `https://your-domain.com`.
+Use **Let’s Encrypt** (`certbot --nginx -d loverscode.duckdns.org`), then set **`CORS_ORIGIN=https://loverscode.duckdns.org`** in `backend/.env`, rebuild the frontend if you changed `VITE_*`, and **`pm2 restart lover-api`**.
 
 ## 7. After you change code (updates)
 
@@ -168,7 +181,7 @@ git pull                    # or re-copy files
 npm install
 npm run build
 cd backend && npm install
-pm2 restart lover-api       # or your process name
+pm2 restart lover-api
 sudo nginx -t && sudo systemctl reload nginx   # only if nginx config changed
 ```
 
@@ -185,4 +198,16 @@ Backend `CORS_ORIGIN` must be the **SPA** origin (e.g. `https://app.your-domain.
 
 ---
 
-**Summary:** Push or copy the repo to the VM, configure `backend/.env`, run the API with pm2, build the SPA, point nginx at `dist/` and proxy `/api` + `/socket.io` to Node. Updates = pull, `npm install`, `npm run build`, restart pm2.
+**Summary:** Push or copy the repo to the VM, configure `backend/.env`, run the API with PM2 **from `backend/`** (`ecosystem.config.cjs`), build the SPA, point nginx at `dist/` and proxy `/api` + `/socket.io` to Node. Updates = pull, `npm install` (root + backend), `npm run build`, `pm2 restart lover-api`.
+
+---
+
+## Round-up checklist (`loverscode.duckdns.org`)
+
+1. **DuckDNS:** Host points to your VM IP; `ping loverscode.duckdns.org` returns that IP.  
+2. **Firewall:** TCP **80**, **443**, **22** allowed as needed.  
+3. **`backend/.env`:** `NODE_ENV=production`, `HOST=0.0.0.0`, `PORT=4000`, `CORS_ORIGIN=https://loverscode.duckdns.org`, `TRUST_PROXY=1`, secrets set.  
+4. **Backend deps:** `cd backend && npm install` (then PM2 as above).  
+5. **Frontend:** Root `.env` with `VITE_PUBLIC_APP_URL=https://loverscode.duckdns.org` if the app needs a stable public URL; `npm run build`.  
+6. **nginx:** `server_name` + TLS; `proxy_set_header X-Forwarded-Proto $scheme`.  
+7. **Smoke test:** `curl -s https://loverscode.duckdns.org/health` and open the site in a browser; log in and hit one authenticated API.

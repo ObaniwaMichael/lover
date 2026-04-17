@@ -26,12 +26,15 @@ vite.config.ts.timestamp-*.mjs
 
 # Environment variables
 .env
+.env.example
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
 config.env
 backend/config.env
+backend/.env.example
+backend/.env
 
 # Database files
 *.db
