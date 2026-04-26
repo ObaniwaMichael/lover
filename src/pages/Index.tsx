@@ -89,13 +89,13 @@ const Index = () => {
   ];
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-background text-foreground">
+    <div className="relative min-h-[100dvh] w-full max-w-full overflow-x-hidden bg-background text-foreground">
       <div
-        className="pointer-events-none absolute inset-0 opacity-90"
+        className="pointer-events-none absolute inset-0 opacity-90 overflow-x-clip"
         aria-hidden
       >
         <div
-          className={`absolute -top-40 left-1/2 h-[520px] w-[120%] -translate-x-1/2 rounded-full blur-3xl ${
+          className={`absolute -top-40 left-1/2 h-[min(520px,70vh)] w-full max-w-[100vw] -translate-x-1/2 scale-x-110 rounded-full blur-3xl ${
             isNight
               ? "bg-[radial-gradient(circle_at_50%_30%,rgba(139,92,246,0.35),transparent_55%)]"
               : "bg-[radial-gradient(circle_at_50%_30%,rgba(192,132,252,0.28),transparent_55%)]"
@@ -139,8 +139,8 @@ const Index = () => {
 
       <main className="relative z-10">
         <section className="mx-auto max-w-7xl px-4 pb-16 pt-10 sm:px-6 sm:pt-14 lg:px-8 lg:pt-20">
-          <div className="grid items-center gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(280px,520px)] lg:gap-16 xl:gap-20">
-            <div className="order-2 flex flex-col gap-8 lg:order-1">
+          <div className="grid min-w-0 items-center gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(240px,520px)] lg:gap-16 xl:gap-20">
+            <div className="order-2 flex min-w-0 flex-col gap-8 lg:order-1">
               <div className="space-y-5 animate-fade-in">
                 <Badge
                   variant="secondary"
@@ -246,8 +246,8 @@ const Index = () => {
               </figure>
             </div>
 
-            <div className="order-1 lg:order-2">
-              <div className="relative mx-auto max-w-[min(100%,520px)] animate-fade-in-right">
+            <div className="order-1 min-w-0 lg:order-2">
+              <div className="relative mx-auto w-full max-w-[min(100%,520px)] animate-fade-in-right">
                 <div
                   className="absolute -inset-4 rounded-[2rem] bg-gradient-to-br from-violet-500/20 via-fuchsia-500/10 to-transparent blur-2xl"
                   aria-hidden

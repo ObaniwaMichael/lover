@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Menu, X, Heart, Users, MessageCircle, Share2, Sparkles, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +23,16 @@ const HamburgerMenu: React.FC<HamburgerMenuProps> = ({
   const [isOpen, setIsOpen] = useState(false);
   const [showShareDialog, setShowShareDialog] = useState(false);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (isOpen) {
+      const prev = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      return () => {
+        document.body.style.overflow = prev;
+      };
+    }
+  }, [isOpen]);
 
   const handleNavigation = (page: string) => {
     setIsOpen(false);
@@ -65,8 +75,10 @@ const HamburgerMenu: React.FC<HamburgerMenuProps> = ({
           />
           
           {/* Menu Panel */}
-          <div className="absolute top-0 right-0 w-80 h-full bg-white dark:bg-gray-900 shadow-xl transform transition-transform duration-300 ease-in-out">
-            <div className="p-6 space-y-6">
+          <div
+            className="absolute top-0 right-0 h-full w-[min(20rem,calc(100vw-env(safe-area-inset-left)-env(safe-area-inset-right)))] max-w-full bg-white dark:bg-gray-900 shadow-xl transform transition-transform duration-300 ease-in-out pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+          >
+            <div className="h-full overflow-y-auto overflow-x-hidden p-4 sm:p-6 space-y-6 [overscroll-behavior:contain] [-webkit-overflow-scrolling:touch]">
               {/* Header */}
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">

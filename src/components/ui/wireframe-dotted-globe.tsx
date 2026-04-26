@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import * as d3 from "d3"
 import { Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -37,8 +37,25 @@ export default function RotatingEarth({
   className = "",
 }: RotatingEarthProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [box, setBox] = useState({ w: 0, h: 0 })
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  useLayoutEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect
+      if (cr) {
+        setBox({ w: Math.floor(cr.width), h: Math.floor(cr.height) })
+      }
+    })
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+    }
+  }, [])
 
   useEffect(() => {
     if (!canvasRef.current) return
@@ -47,8 +64,19 @@ export default function RotatingEarth({
     const context = canvas.getContext("2d")
     if (!context) return
 
-    const containerWidth = Math.min(width, window.innerWidth - 40)
-    const containerHeight = Math.min(height, window.innerHeight - 100)
+    const fromLayout = box.w > 0
+    const containerWidth = Math.max(
+      160,
+      Math.min(width, fromLayout ? box.w : Math.max(200, window.innerWidth - 32)),
+    )
+    const containerHeight = Math.max(
+      160,
+      Math.min(
+        height,
+        fromLayout && box.h > 0 ? box.h : window.innerHeight - 100,
+        containerWidth * 1.05,
+      ),
+    )
     const radius = Math.min(containerWidth, containerHeight) / 2.5
 
     const dpr = window.devicePixelRatio || 1
@@ -237,36 +265,49 @@ export default function RotatingEarth({
 
     const rotationTimer = d3.timer(rotate)
 
-    const handleMouseDown = (event: MouseEvent) => {
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return
+      try {
+        canvas.setPointerCapture(event.pointerId)
+      } catch {
+        // ignore
+      }
+      event.preventDefault()
       autoRotate = false
       const startX = event.clientX
       const startY = event.clientY
       const startRotation: [number, number, number] = [...rotation]
 
-      const handleMouseMove = (moveEvent: MouseEvent) => {
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        if (moveEvent.pointerId !== event.pointerId) return
         const sensitivity = 0.5
         const dx = moveEvent.clientX - startX
         const dy = moveEvent.clientY - startY
-
         rotation[0] = startRotation[0] + dx * sensitivity
         rotation[1] = startRotation[1] - dy * sensitivity
         rotation[1] = Math.max(-90, Math.min(90, rotation[1]))
-
         projection.rotate(rotation)
         render()
       }
 
-      const handleMouseUp = () => {
-        document.removeEventListener("mousemove", handleMouseMove)
-        document.removeEventListener("mouseup", handleMouseUp)
-
+      const endDrag = (endEvent: PointerEvent) => {
+        if (endEvent.pointerId !== event.pointerId) return
+        canvas.removeEventListener("pointermove", handlePointerMove)
+        canvas.removeEventListener("pointerup", endDrag)
+        canvas.removeEventListener("pointercancel", endDrag)
+        try {
+          canvas.releasePointerCapture(event.pointerId)
+        } catch {
+          // ignore
+        }
         setTimeout(() => {
           autoRotate = true
         }, 10)
       }
 
-      document.addEventListener("mousemove", handleMouseMove)
-      document.addEventListener("mouseup", handleMouseUp)
+      canvas.addEventListener("pointermove", handlePointerMove)
+      canvas.addEventListener("pointerup", endDrag)
+      canvas.addEventListener("pointercancel", endDrag)
     }
 
     const handleWheel = (event: WheelEvent) => {
@@ -277,17 +318,17 @@ export default function RotatingEarth({
       render()
     }
 
-    canvas.addEventListener("mousedown", handleMouseDown)
+    canvas.addEventListener("pointerdown", handlePointerDown)
     canvas.addEventListener("wheel", handleWheel, { passive: false })
 
     void loadWorldData()
 
     return () => {
       rotationTimer.stop()
-      canvas.removeEventListener("mousedown", handleMouseDown)
+      canvas.removeEventListener("pointerdown", handlePointerDown)
       canvas.removeEventListener("wheel", handleWheel)
     }
-  }, [width, height])
+  }, [width, height, box.w, box.h])
 
   if (error) {
     return (
@@ -306,7 +347,7 @@ export default function RotatingEarth({
   }
 
   return (
-    <div className={cn("relative", className)}>
+    <div ref={containerRef} className={cn("relative w-full min-w-0", className)}>
       {isLoading ? (
         <div
           className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-background/70 backdrop-blur-sm"
@@ -318,7 +359,7 @@ export default function RotatingEarth({
       ) : null}
       <canvas
         ref={canvasRef}
-        className="h-auto w-full rounded-2xl bg-background"
+        className="h-auto w-full max-w-full touch-none rounded-2xl bg-background"
         style={{ maxWidth: "100%", height: "auto" }}
       />
       <div className="absolute bottom-4 left-4 rounded-md bg-muted/90 px-2 py-1 text-xs text-muted-foreground backdrop-blur-sm">

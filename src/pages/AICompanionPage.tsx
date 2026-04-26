@@ -291,7 +291,7 @@ const AICompanionPage: React.FC = () => {
 
   if (!companionConfig) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-100 via-purple-50 to-slate-200 dark:from-slate-900 dark:via-purple-900 dark:to-slate-800 flex items-center justify-center">
+      <div className="min-h-[100dvh] w-full max-w-full overflow-x-hidden bg-gradient-to-br from-slate-100 via-purple-50 to-slate-200 dark:from-slate-900 dark:via-purple-900 dark:to-slate-800 flex items-center justify-center">
         <div className="text-center">
           <div className="w-16 h-16 bg-gradient-to-br from-pink-400 to-rose-500 rounded-full flex items-center justify-center mx-auto mb-4">
             <Bot className="w-8 h-8 text-white animate-pulse" />
@@ -305,36 +305,44 @@ const AICompanionPage: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-100 via-purple-50 to-slate-200 dark:from-slate-900 dark:via-purple-900 dark:to-slate-800 flex flex-col">
+    <div className="flex h-[100dvh] max-h-[100dvh] w-full min-h-0 max-w-full flex-col overflow-x-hidden overflow-y-hidden bg-gradient-to-br from-slate-100 via-purple-50 to-slate-200 dark:from-slate-900 dark:via-purple-900 dark:to-slate-800">
       {/* Subtle resume banner */}
       {showResumeBanner && (
-        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50">
-          <div className="flex items-center gap-3 bg-white/90 dark:bg-black/80 border border-pink-200 dark:border-pink-800 rounded-lg shadow-lg px-4 py-2">
-            <Sparkles className="h-4 w-4 text-pink-400" />
-            <span className="text-sm text-pink-700 dark:text-pink-200">
-              Resumed your last chat with <b>{companionConfig.name}</b>.
-            </span>
+        <div
+          className="fixed z-50 left-3 right-3 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 w-auto sm:max-w-lg flex justify-center pointer-events-none"
+          style={{ top: "max(0.75rem, env(safe-area-inset-top))" }}
+        >
+          <div className="pointer-events-auto flex w-full max-w-lg flex-col gap-2 rounded-lg border border-pink-200 bg-white/90 px-3 py-2 shadow-lg dark:border-pink-800 dark:bg-black/80 sm:flex-row sm:items-center sm:gap-3 sm:px-4">
+            <div className="flex items-start gap-2 min-w-0 sm:items-center">
+              <Sparkles className="h-4 w-4 shrink-0 text-pink-400" />
+              <span className="text-left text-sm text-pink-700 dark:text-pink-200 break-words">
+                Resumed your last chat with <b>{companionConfig.name}</b>.
+              </span>
+            </div>
+            <div className="flex shrink-0 items-center justify-end gap-1 sm:ml-auto">
             <Button
               size="sm"
               variant="outline"
-              className="border-pink-300 text-pink-700 hover:bg-pink-50 ml-2"
+              className="border-pink-300 text-pink-700 hover:bg-pink-50 text-xs sm:text-sm"
               onClick={handleResetCompanion}
             >
-              Start New Companion
+              <span className="hidden sm:inline">Start New Companion</span>
+              <span className="sm:hidden">New</span>
             </Button>
             <button
-              className="ml-1 text-pink-400 hover:text-pink-600"
+              className="text-pink-400 hover:text-pink-600 p-1.5"
               onClick={() => setShowResumeBanner(false)}
               aria-label="Dismiss"
             >
               <XCircle className="h-4 w-4" />
             </button>
+            </div>
           </div>
         </div>
       )}
 
         {/* Header */}
-      <div className="bg-gradient-to-r from-purple-600 to-pink-600 text-white p-3 sm:p-4 flex items-center justify-between shadow-md">
+      <div className="shrink-0 bg-gradient-to-r from-purple-600 to-pink-600 p-3 text-white sm:p-4 flex items-center justify-between shadow-md">
         <div className="flex items-center gap-2 sm:gap-3">
           <Button
             variant="ghost"
@@ -402,12 +410,12 @@ const AICompanionPage: React.FC = () => {
         />
       </div>
 
-      {/* Main Content: Two-column layout */}
-      <div className="flex-1 flex flex-col lg:flex-row gap-4 sm:gap-6 max-w-7xl mx-auto w-full p-4 sm:p-6">
+      {/* Main: on mobile, sidebar (order-1) above chat+composer (order-2) so the text bar sits on the home indicator */}
+      <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col gap-3 overflow-hidden p-3 sm:gap-6 sm:p-6 lg:flex-row">
         {/* Chat Area */}
-          <div className="flex-1 flex flex-col">
-            <Card className="flex-1 border-pink-200/50 bg-white/80 dark:bg-black/40 backdrop-blur-sm">
-              <CardContent className="p-4 sm:p-6 h-80 sm:h-96 overflow-y-auto space-y-3 sm:space-y-4">
+        <div className="order-2 flex min-h-0 min-w-0 flex-1 flex-col lg:order-1">
+            <Card className="flex min-h-0 min-w-0 flex-1 flex-col border-pink-200/50 bg-white/80 dark:bg-black/40 backdrop-blur-sm overflow-hidden">
+              <CardContent className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3 sm:space-y-4 sm:p-6 [-webkit-overflow-scrolling:touch]">
               {messages.length === 0 && (
                 <div className="text-center py-6 sm:py-8 text-pink-400">
                   <Bot className="w-8 h-8 sm:w-12 sm:h-12 mx-auto mb-2 opacity-50" />
@@ -478,15 +486,15 @@ const AICompanionPage: React.FC = () => {
                 )}
               </CardContent>
             </Card>
-            {/* Message Input */}
-          <div className="bg-white dark:bg-black/40 p-3 sm:p-4 border-t border-pink-200/40 dark:border-pink-800/40 sticky bottom-0 z-10">
-            <form onSubmit={e => { e.preventDefault(); handleSendMessage(); }} className="flex items-center gap-2">
+            {/* Message Input — pinned in column above safe area, not in the middle of the page */}
+            <div className="shrink-0 border-t border-pink-200/40 bg-white/95 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] dark:border-pink-800/40 dark:bg-black/50 sm:p-3">
+            <form onSubmit={e => { e.preventDefault(); handleSendMessage(); }} className="flex min-w-0 items-center gap-2">
               <Input
                 value={inputMessage}
                 onChange={(e) => setInputMessage(e.target.value)}
                 onKeyDown={handleKeyPress}
                 placeholder={isTyping ? "AI is typing..." : isSending ? "Sending..." : "Share anything on your heart..."}
-                className="flex-1 border-pink-200 focus:border-pink-400 bg-white/80 dark:bg-black/40 backdrop-blur-sm text-sm"
+                className="min-h-11 min-w-0 flex-1 border-pink-200 bg-white/90 text-base focus:border-pink-400 dark:bg-black/50 sm:min-h-10 sm:text-sm"
                 disabled={isTyping || isSending}
               />
               <Button
@@ -494,15 +502,15 @@ const AICompanionPage: React.FC = () => {
                 disabled={!inputMessage.trim() || isTyping || isSending}
                 loading={isSending}
                 loadingText="Sending..."
-                className="bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white px-3 sm:px-4"
+                className="h-11 shrink-0 touch-manipulation bg-gradient-to-r from-pink-500 to-rose-500 px-3 hover:from-pink-600 hover:to-rose-600 sm:h-10"
               >
                 <Send className="w-4 h-4" />
               </Button>
             </form>
-          </div>
+            </div>
         </div>
           {/* Sidebar */}
-        <div className="w-full lg:w-80 space-y-4 sm:space-y-6 mt-6 sm:mt-8 lg:mt-0">
+        <div className="order-1 w-full min-w-0 max-lg:max-h-40 max-lg:min-h-0 max-lg:overflow-y-auto sm:mt-0 space-y-4 sm:space-y-6 lg:order-2 lg:mt-0 lg:max-h-none lg:w-80">
             {/* Companion Info */}
             <Card className="border-pink-200/50 bg-white/80 dark:bg-black/40 backdrop-blur-sm">
               <CardHeader className="pb-3">
@@ -565,13 +573,12 @@ const AICompanionPage: React.FC = () => {
                 </div>
               </CardContent>
             </Card>
-          </div>
         </div>
-      {/* Footer */}
-        <div className="text-center p-4 sm:p-6">
-          <p className="text-xs sm:text-sm text-muted-foreground italic">
-            "In the realm of AI and human connection, understanding knows no boundaries."
-          </p>
+      </div>
+      <div className="shrink-0 p-2 text-center max-lg:hidden sm:p-6">
+        <p className="text-xs sm:text-sm text-muted-foreground italic">
+          "In the realm of AI and human connection, understanding knows no boundaries."
+        </p>
       </div>
     </div>
   );

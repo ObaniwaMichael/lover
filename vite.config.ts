@@ -1,5 +1,5 @@
 import { defineConfig, loadEnv } from "vite";
-import react from "@vitejs/plugin-react-swc";
+import react from "@vitejs/plugin-react";
 import path from "path";
 import { componentTagger } from "lovable-tagger";
 import { devTerminalWatchPlugin } from "./vite/devTerminalWatchPlugin";
@@ -14,11 +14,6 @@ export default defineConfig(({ mode }) => {
   );
 
   return {
-  // Strip console/debugger from production client bundle (Rolldown/Vite 8: prefer top-level esbuild).
-  esbuild:
-    mode === "production"
-      ? { drop: ["console", "debugger"] as ("console" | "debugger")[] }
-      : undefined,
   server: {
     host: env.VITE_DEV_HOST || "localhost",
     port: devPort,
@@ -26,9 +21,20 @@ export default defineConfig(({ mode }) => {
   },
   build: {
     chunkSizeWarningLimit: 1000,
-    rollupOptions: {
+    // Vite 8: use rolldownOptions (rollupOptions is a deprecated alias)
+    rolldownOptions: {
       output: {
-        manualChunks(id) {
+        ...(mode === "production"
+          ? {
+              // Replaces top-level `esbuild: { drop: ['console', 'debugger'] }` (Oxc minifier; see Vite 8 migration)
+              minify: {
+                compress: {
+                  dropConsole: true,
+                },
+              },
+            }
+          : {}),
+        manualChunks(id: string) {
           if (id.includes("node_modules/react/") || id.includes("node_modules/react-dom")) {
             return "vendor";
           }

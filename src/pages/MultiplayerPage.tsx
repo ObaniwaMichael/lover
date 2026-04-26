@@ -1477,7 +1477,8 @@ Let's connect and have fun together! 🎉`;
         style={{ 
           WebkitOverflowScrolling: 'touch',
           overscrollBehavior: 'contain',
-          paddingBottom: '200px' // Space for fixed input area
+          // Space for fixed bottom bar; scales on short phones
+          paddingBottom: 'max(10rem, min(200px, 45vh))',
         }}
       >
         {messages.length === 0 && (
@@ -1578,21 +1579,15 @@ Let's connect and have fun together! 🎉`;
 
       {/* Message Input - Fixed at bottom with iOS safe area support */}
       <div 
-        className="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 flex-shrink-0 z-50"
+        className="absolute bottom-0 left-0 right-0 z-50 w-full min-w-0 max-w-full border-t border-gray-200 bg-white/95 flex-shrink-0 backdrop-blur-sm dark:border-gray-700 dark:bg-gray-800/95"
         style={{ 
           paddingBottom: 'max(env(safe-area-inset-bottom), 8px)',
           paddingLeft: 'max(env(safe-area-inset-left), 0px)',
           paddingRight: 'max(env(safe-area-inset-right), 0px)',
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          width: '100%',
-          backgroundColor: 'rgb(255, 255, 255)'
         }}
       >
         <div className="p-2 sm:p-3">
-        <form onSubmit={handleSendMessage} className="flex items-center gap-1 sm:gap-2 flex-wrap">
+        <form onSubmit={handleSendMessage} className="flex w-full min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:gap-2 sm:flex-wrap">
           <input
             type="file"
             ref={fileInputRef}
@@ -1600,8 +1595,8 @@ Let's connect and have fun together! 🎉`;
             onChange={handleImageSelect}
             className="hidden"
           />
-          {/* Action buttons - wrap on mobile */}
-          <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+          {/* Action buttons — own row on narrow screens so the text field stays full width */}
+          <div className="flex w-full min-w-0 max-w-full items-center justify-between gap-1 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] sm:w-auto sm:justify-start sm:gap-2 sm:overflow-visible sm:pb-0 [&::-webkit-scrollbar]:hidden">
             <Button
               type="button"
               variant="outline"
@@ -1690,12 +1685,12 @@ Let's connect and have fun together! 🎉`;
           </div>
 
           {/* Input and Send button - full width on mobile */}
-          <div className="flex items-center gap-1 sm:gap-2 w-full sm:w-auto flex-1 min-w-0">
+          <div className="flex min-w-0 w-full items-center gap-1.5 sm:gap-2 sm:w-auto sm:min-w-[12rem] sm:flex-1">
             <Input
               value={messageInput}
               onChange={(e) => setMessageInput(e.target.value)}
               placeholder={!isConnected ? "Connecting..." : !partnerOnline ? "Waiting..." : "Type a message..."}
-              className="flex-1 border-purple-300 focus:border-purple-500 text-sm min-w-0 text-base sm:text-sm"
+              className="min-h-11 min-w-0 flex-1 border-purple-300 text-base focus:border-purple-500 sm:min-h-10 sm:text-sm"
               disabled={!isConnected}
               style={{ fontSize: '16px' }}
               onFocus={(e) => {
@@ -1719,8 +1714,7 @@ Let's connect and have fun together! 🎉`;
           </div>
         </form>
         </div>
-        {/* Bottom text element - visible on all screen sizes */}
-        <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 text-center italic px-2 pb-2 pt-1 block">
+        <p className="hidden px-2 pb-1 pt-0.5 text-center text-xs italic text-gray-500 dark:text-gray-400 sm:block sm:pb-2 sm:pt-1 sm:text-sm">
           "Connection is the bridge between two hearts, built one message at a time."
         </p>
       </div>

@@ -79,6 +79,12 @@
     -webkit-tap-highlight-color: rgba(139, 92, 246, 0.2);
     touch-action: manipulation;
   }
+  html {
+    /* Prevent horizontal rubber-band / subpixel overflow on iOS */
+    overflow-x: hidden;
+    /* Avoid automatic text size inflation in landscape (iOS) */
+    -webkit-text-size-adjust: 100%;
+  }
   body {
     @apply bg-background text-foreground;
     /* iOS safe area support */
@@ -88,9 +94,17 @@
     padding-right: env(safe-area-inset-right);
     /* Prevent iOS bounce scrolling on body */
     overscroll-behavior-y: none;
+    min-height: 100%;
+    min-height: 100dvh;
     /* Better font rendering on iOS */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+  }
+  #root {
+    min-width: 0;
+    min-height: 100%;
+    min-height: 100dvh;
+    overflow-x: hidden;
   }
   
   /* iOS input zoom prevention */
