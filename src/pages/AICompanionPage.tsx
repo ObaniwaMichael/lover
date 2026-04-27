@@ -305,7 +305,7 @@ const AICompanionPage: React.FC = () => {
   }
 
   return (
-    <div className="flex h-[100dvh] max-h-[100dvh] w-full min-h-0 max-w-full flex-col overflow-x-hidden overflow-y-hidden bg-gradient-to-br from-slate-100 via-purple-50 to-slate-200 dark:from-slate-900 dark:via-purple-900 dark:to-slate-800">
+    <div className="flex h-[var(--app-height)] max-h-[var(--app-height)] w-full min-h-0 max-w-full flex-col overflow-x-hidden overflow-y-hidden bg-gradient-to-br from-slate-100 via-purple-50 to-slate-200 dark:from-slate-900 dark:via-purple-900 dark:to-slate-800">
       {/* Subtle resume banner */}
       {showResumeBanner && (
         <div

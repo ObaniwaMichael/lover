@@ -64,7 +64,7 @@ const SoloPage = () => {
   };
 
   return (
-    <div className="flex h-[100dvh] max-h-[100dvh] w-full min-h-0 max-w-full flex-col overflow-x-hidden overflow-y-hidden bg-gradient-to-br from-slate-100 via-purple-50 to-slate-200 dark:from-slate-900 dark:via-purple-900 dark:to-slate-800">
+    <div className="flex h-[var(--app-height)] max-h-[var(--app-height)] w-full min-h-0 max-w-full flex-col overflow-x-hidden overflow-y-hidden bg-gradient-to-br from-slate-100 via-purple-50 to-slate-200 dark:from-slate-900 dark:via-purple-900 dark:to-slate-800">
       {/* Header */}
       <div className="shrink-0 bg-gradient-to-r from-purple-600 to-pink-600 text-white p-3 sm:p-4 flex items-center justify-between shadow-md">
         <div className="flex items-center gap-2 sm:gap-3">

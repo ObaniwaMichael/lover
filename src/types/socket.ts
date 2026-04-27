@@ -1,5 +1,6 @@
 // Socket message types for better type safety
 export interface SocketMessage {
+  id?: string;
   text: string;
   sender: string;
   timestamp: string | Date;

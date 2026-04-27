@@ -48,7 +48,6 @@ const MultiplayerPage = () => {
   const [isJoiningSession, setIsJoiningSession] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [showTruthOrDare, setShowTruthOrDare] = useState(false);
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [truthOrDareResult, setTruthOrDareResult] = useState<{type: string, content: string, difficulty: string, playerName: string} | null>(null);
   const [showTruthOrDarePopup, setShowTruthOrDarePopup] = useState(false);
@@ -580,7 +579,7 @@ const MultiplayerPage = () => {
         connectionStateRecovery: {
           maxDisconnectionDuration: 2 * 60 * 1000,
         },
-      });
+      } as any);
       socketRef.current = socket;
 
       const nudgeReconnect = () => {
@@ -690,7 +689,7 @@ const MultiplayerPage = () => {
             sender: msg.playerName || msg.sender,
             timestamp: new Date(msg.timestamp),
             playerName: msg.playerName || msg.sender,
-            type: msg.type || 'text',
+            type: msg.type === 'image' || msg.type === 'emoji' ? msg.type : 'text',
             imageData: msg.imageData,
             imageUrl: msg.imageUrl
           }));
@@ -747,14 +746,14 @@ const MultiplayerPage = () => {
         const msgSender = msg.playerName || msg.sender;
         const msgText = msg.text || '';
         const msgImageData = msg.imageData || msg.imageUrl || '';
-        const msgType = msg.type || 'text';
+        const msgType: SocketMessage['type'] = msg.type === 'image' || msg.type === 'emoji' ? msg.type : 'text';
         
         // Generate a more robust unique ID for the message to prevent duplicates
         // Use content hash instead of exact timestamp to catch duplicates even with slight timestamp differences
         const contentHash = `${msgText}${msgImageData}`.substring(0, 50); // First 50 chars of content
         const messageId = `${msg.sessionId || trimmedSessionId}-${msgSender}-${contentHash}-${Math.floor(msgTimestamp.getTime() / 1000)}`; // Round to seconds
         
-        const messageWithDate = {
+        const messageWithDate: SocketMessage = {
           ...msg,
           id: messageId,
           timestamp: msgTimestamp,
@@ -965,7 +964,6 @@ const MultiplayerPage = () => {
     const reader = new FileReader();
     reader.onload = (event) => {
       const base64Image = event.target?.result as string;
-      setSelectedImage(base64Image);
       sendImageMessage(base64Image, file.type);
     };
     reader.onerror = () => {
@@ -995,7 +993,6 @@ const MultiplayerPage = () => {
       // Send to server (will broadcast to all including sender)
       socketRef.current.emit("chat message", { ...message, sessionId });
       
-      setSelectedImage(null);
       setIsUploadingImage(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -1304,7 +1301,7 @@ const MultiplayerPage = () => {
   }
 
   return (
-        <div className="h-screen h-[100dvh] bg-gray-100 dark:bg-gray-900 flex flex-col overflow-hidden fixed inset-0" style={{ paddingTop: 'env(safe-area-inset-top)', paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)' }}>
+        <div className="h-[var(--app-height)] bg-gray-100 dark:bg-gray-900 flex flex-col overflow-hidden fixed inset-0" style={{ paddingTop: 'env(safe-area-inset-top)', paddingLeft: 'env(safe-area-inset-left)', paddingRight: 'env(safe-area-inset-right)' }}>
       {/* Header - Fixed at top */}
       <div className="bg-gradient-to-r from-purple-600 to-pink-600 text-white p-2 sm:p-3 flex items-center justify-between flex-shrink-0 z-40 relative" style={{ position: 'sticky', top: 0 }}>
         <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
@@ -1332,7 +1329,7 @@ const MultiplayerPage = () => {
                 <span className="text-purple-100 sm:hidden text-[10px]">{isConnected ? 'On' : 'Off'}</span>
               </div>
               {partnerOnline && (
-                <div className="flex items-center gap-1 flex-shrink-0 hidden sm:flex">
+                <div className="hidden items-center gap-1 flex-shrink-0 sm:flex">
                   <div className="w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full bg-green-400"></div>
                   <span className="text-green-200 text-[10px] sm:text-xs">Partner</span>
                 </div>

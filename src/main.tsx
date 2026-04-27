@@ -3,6 +3,18 @@ import App from './App.tsx'
 import './index.css'
 import logger from './lib/logger'
 
+const setAppHeightVar = () => {
+  try {
+    const vv = window.visualViewport;
+    const height = vv?.height ?? window.innerHeight;
+    // Use px because visualViewport is in px.
+    document.documentElement.style.setProperty("--app-height", `${height}px`);
+  } catch (e) {
+    // Non-fatal; fallback to CSS defaults.
+    logger.error("Failed to set --app-height:", e);
+  }
+};
+
 // Global error handler
 window.addEventListener('error', (event) => {
   logger.error('Global error:', event.error);
@@ -52,6 +64,13 @@ const showUserFriendlyError = (message: string) => {
   `;
   document.body.appendChild(errorDiv);
 };
+
+// Mobile viewport height fix (keyboard + address bar)
+setAppHeightVar();
+window.addEventListener("resize", setAppHeightVar);
+window.addEventListener("orientationchange", setAppHeightVar);
+window.visualViewport?.addEventListener("resize", setAppHeightVar);
+window.visualViewport?.addEventListener("scroll", setAppHeightVar);
 
 // Wait for DOM to be ready
 document.addEventListener('DOMContentLoaded', () => {

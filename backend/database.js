@@ -533,6 +533,30 @@ export default class DatabaseManager {
     await this.pg.query('UPDATE users SET last_login = NOW() WHERE id = $1', [userId]);
   }
 
+  async updateUserProfile(userId, { username, email }) {
+    if (this.sqlite) return this.sqlite.updateUserProfile(userId, { username, email });
+
+    const fields = [];
+    const params = [];
+    let i = 1;
+    if (username) {
+      fields.push(`username = $${i++}`);
+      params.push(username);
+    }
+    if (email) {
+      fields.push(`email = $${i++}`);
+      params.push(email);
+    }
+    if (fields.length === 0) return;
+    params.push(userId);
+    await this.pg.query(`UPDATE users SET ${fields.join(', ')} WHERE id = $${i}`, params);
+  }
+
+  async updateUserPassword(userId, passwordHash) {
+    if (this.sqlite) return this.sqlite.updateUserPassword(userId, passwordHash);
+    await this.pg.query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, userId]);
+  }
+
   async close() {
     if (this.pg) {
       await this.pg.end();

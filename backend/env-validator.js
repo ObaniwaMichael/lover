@@ -15,8 +15,6 @@ const validateEnvironment = () => {
     'GEMINI_MODEL',
     'DATABASE_URL',
     'PG_POOL_MAX',
-    'SUPABASE_URL',
-    'SUPABASE_ANON_KEY',
     'PORT',
     'NODE_ENV',
     'CORS_ORIGIN',
@@ -48,8 +46,6 @@ const validateEnvironment = () => {
       const hiddenKeys = [
         'MONGODB_URI',
         'DATABASE_URL',
-        'SUPABASE_URL',
-        'SUPABASE_ANON_KEY',
         'MAINTENANCE_SECRET',
         'GEMINI_API_KEY',
         'GEMINI_API_KEY_2',

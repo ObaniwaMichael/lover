@@ -676,6 +676,28 @@ class SqliteDatabase {
     stmt.run(userId);
   }
 
+  updateUserProfile(userId, { username, email }) {
+    const fields = [];
+    const params = [];
+    if (username) {
+      fields.push('username = ?');
+      params.push(username);
+    }
+    if (email) {
+      fields.push('email = ?');
+      params.push(email);
+    }
+    if (fields.length === 0) return;
+    params.push(userId);
+    const stmt = this.db.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...params);
+  }
+
+  updateUserPassword(userId, passwordHash) {
+    const stmt = this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+    stmt.run(passwordHash, userId);
+  }
+
   // Close database connection
   close() {
     if (this.db) {

@@ -13,11 +13,10 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import ServerMonitor from './monitoring.js';
 import DatabaseManager from './database.js';
-import User from './user_model.js'; // Supabase-based User model
+import User, { setUserModelDb } from './user_model.js';
 import validateEnvironment from './env-validator.js';
 import { initGeminiModels, isGeminiAvailable, geminiGenerateText } from './gemini-client.js';
-import { supabase, supabaseConnected } from './supabase-client.js';
-import MultiplayerModel from './multiplayer_model.js'; // Import Supabase connection status
+import MultiplayerModel, { setMultiplayerModelDb } from './multiplayer_model.js';
 import { authenticateToken } from './middleware/authMiddleware.js';
 import { requireMaintenanceKey } from './middleware/maintenanceAuth.js';
 
@@ -35,8 +34,6 @@ validateEnvironment();
 // Debug: Check if environment variables are loaded
 console.log('🔍 Environment check:');
 initGeminiModels();
-console.log('  SUPABASE_URL:', process.env.SUPABASE_URL ? 'Found' : 'Not found');
-console.log('  SUPABASE_ANON_KEY:', process.env.SUPABASE_ANON_KEY ? 'Found' : 'Not found');
 console.log('  PORT:', process.env.PORT || 'Using default');
 console.log('  NODE_ENV:', process.env.NODE_ENV || 'development');
 
@@ -68,6 +65,8 @@ if (process.env.TRUST_PROXY === '0' || process.env.TRUST_PROXY === 'false') {
 const monitor = new ServerMonitor();
 const db = new DatabaseManager();
 await db.initialize();
+setUserModelDb(db);
+setMultiplayerModelDb(db);
 
 // Security middleware with enhanced configuration
 app.use(helmet({
@@ -498,15 +497,8 @@ io.on('connection', (socket) => {
         lastActivity: Date.now()
       });
       
-      // Create session in database (Supabase first, SQLite fallback)
+      // Create session in database
       try {
-        if (supabaseConnected) {
-          const supabaseSession = await MultiplayerModel.createOrGetSession(sessionId, `Multiplayer Session ${sessionId}`);
-          if (supabaseSession) {
-            console.log(`📊 Created/retrieved multiplayer session in Supabase: ${sessionId}`);
-          }
-        }
-        // Local DB (SQLite or PostgreSQL)
         try {
           const existingSession = await db.getMultiplayerSession(sessionId);
           if (!existingSession) {
@@ -543,11 +535,8 @@ io.on('connection', (socket) => {
       console.log(`⚠️  Socket ${socket.id} was already in session "${sessionId}"`);
     }
     
-    // Update participant count in database (Supabase first, SQLite fallback)
+    // Update participant count in database
     try {
-      if (supabaseConnected) {
-        await MultiplayerModel.updateParticipantCount(sessionId, session.participants.size);
-      }
       try {
         await db.updateMultiplayerParticipantCount(sessionId, session.participants.size);
       } catch (sqliteError) {
@@ -566,25 +555,16 @@ io.on('connection', (socket) => {
     console.log(`🔍 All active sessions:`, Array.from(sessions.keys()));
     console.log(`🔍 Session "${sessionId}" participants:`, Array.from(session.participants));
     
-    // Load previous messages from database and send to the joining user (Supabase first, SQLite fallback)
+    // Load previous messages from database and send to the joining user
     try {
       let previousMessages = [];
-      if (supabaseConnected) {
-        previousMessages = await MultiplayerModel.getMessages(sessionId, 100, 0);
+      try {
+        previousMessages = await db.getMultiplayerMessages(sessionId, 100, 0);
         if (previousMessages && previousMessages.length > 0) {
-          console.log(`📜 Loading ${previousMessages.length} previous messages from Supabase for session ${sessionId}`);
+          console.log(`📜 Loading ${previousMessages.length} previous messages from local DB for session ${sessionId}`);
         }
-      }
-      // Local DB if Supabase didn't return messages
-      if (previousMessages.length === 0) {
-        try {
-          previousMessages = await db.getMultiplayerMessages(sessionId, 100, 0);
-          if (previousMessages && previousMessages.length > 0) {
-            console.log(`📜 Loading ${previousMessages.length} previous messages from local DB for session ${sessionId}`);
-          }
-        } catch (sqliteError) {
-          console.error('❌ Failed to load chat history from local DB:', sqliteError);
-        }
+      } catch (sqliteError) {
+        console.error('❌ Failed to load chat history from local DB:', sqliteError);
       }
       
       if (previousMessages && previousMessages.length > 0) {
@@ -673,18 +653,6 @@ io.on('connection', (socket) => {
           dbMessageType = 'emoji';
         }
       }
-      if (supabaseConnected) {
-        await MultiplayerModel.addMessage(
-          data.sessionId,
-          playerName,
-          messageText || '',
-          dbMessageType,
-          null,
-          data.imageData || null,
-          data.imageUrl || null,
-          data.imageType || null
-        );
-      }
       try {
         await db.addMultiplayerMessage(data.sessionId, playerName, messageText || '', dbMessageType);
       } catch (localDbError) {
@@ -749,10 +717,6 @@ io.on('connection', (socket) => {
     
     // Save question to database
     try {
-      // Save to Supabase
-      if (supabaseConnected) {
-        await MultiplayerModel.addMessage(data.sessionId, playerName, data.question, 'question');
-      }
       try {
         await db.addMultiplayerMessage(data.sessionId, playerName, data.question, 'question');
       } catch (sqliteError) {
@@ -793,10 +757,6 @@ io.on('connection', (socket) => {
     
     // Save answer to database
     try {
-      // Save to Supabase
-      if (supabaseConnected) {
-        await MultiplayerModel.addMessage(data.sessionId, playerName, data.answer, 'answer');
-      }
       try {
         await db.addMultiplayerMessage(data.sessionId, playerName, data.answer, 'answer');
       } catch (sqliteError) {
@@ -878,10 +838,6 @@ io.on('connection', (socket) => {
     const messageText = `🎲 ${typeLabel} ${difficultyEmoji}: ${data.result.content}`;
     
     try {
-        // Save to Supabase
-        if (supabaseConnected) {
-          await MultiplayerModel.addMessage(data.sessionId, playerName, messageText, 'game');
-        }
         try {
           await db.addMultiplayerMessage(data.sessionId, playerName, messageText, 'game');
         } catch (sqliteError) {
@@ -1646,94 +1602,31 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters long' });
     }
 
-    // Check if Supabase is available
-    if (supabaseConnected) {
-      try {
-        // Check if user already exists in Supabase
-        const existingUserByUsername = await User.findOne({ username });
-        const existingUserByEmail = await User.findOne({ email });
-
-        if (existingUserByUsername || existingUserByEmail) {
+    const existingByUsername = await User.findOne({ username });
+    const existingByEmail = await User.findOne({ email });
+    if (existingByUsername || existingByEmail) {
       return res.status(409).json({ error: 'Username or email already exists' });
     }
 
-    // Hash password
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    const passwordHash = await bcrypt.hash(password, 12);
+    const user = await User.create({ username, email, password: passwordHash });
 
-        // Create user in Supabase
-        const user = await User.create({
-      username,
-      email,
-          password: hashedPassword
-    });
-
-    // Generate JWT token
     const token = jwt.sign(
-          { userId: user.id, username: user.username },
+      { userId: user.id, username: user.username },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
 
-        return res.status(201).json({
+    return res.status(201).json({
       message: 'User registered successfully',
       token,
       user: {
-            id: user.id,
+        id: user.id,
         username: user.username,
         email: user.email,
-        createdAt: user.createdAt
-      }
+        createdAt: user.createdAt,
+      },
     });
-      } catch (supabaseError) {
-        console.warn('⚠️  Supabase registration failed, falling back to SQLite:', supabaseError.message);
-      }
-    }
-
-    // Fallback to local DB registration
-    try {
-      const existingUserByUsername = await db.getUserByUsername(username);
-      const existingUserByEmail = await db.getUserByEmail(email);
-      
-      if (existingUserByUsername) {
-        return res.status(409).json({ error: 'Username already exists' });
-      }
-      
-      if (existingUserByEmail) {
-        return res.status(409).json({ error: 'Email already exists' });
-      }
-
-      // Hash password
-      const passwordHash = await bcrypt.hash(password, 12);
-      const newUserId = `user-${Date.now()}`;
-      
-      const user = await db.createUser(newUserId, username, email, passwordHash);
-      
-      // Generate JWT token
-      const token = jwt.sign(
-        { userId: newUserId, username: username },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-
-      return res.status(201).json({
-        message: 'User registered successfully',
-        token,
-        user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-          createdAt: user.createdAt
-        }
-      });
-
-    } catch (regError) {
-      console.error('❌ Local DB registration failed:', regError.message);
-      if (regError.message.includes('already exists')) {
-        return res.status(409).json({ error: regError.message });
-      }
-      return res.status(500).json({ error: 'Registration system unavailable' });
-    }
 
   } catch (error) {
     console.error('❌ Registration error:', error);
@@ -1752,116 +1645,61 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
-    // Check if Supabase is available
-    if (supabaseConnected) {
-      try {
-        // Find user in Supabase with timeout
-        let user;
-        try {
-          const findUserPromise = User.findOne({ username });
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Database query timeout')), 5000)
-          );
-          user = await Promise.race([findUserPromise, timeoutPromise]);
-        } catch (timeoutError) {
-          console.warn('⚠️  Supabase query timeout, falling back to SQLite');
-          throw timeoutError; // Will trigger fallback
-        }
+    // Allow login by username OR email
+    let userByUsername = null;
+    let userByEmail = null;
+    let usedDbFallback = false;
 
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid username or password' });
-    }
-
-    // Check password with timeout
-    let isValidPassword;
     try {
-      const comparePromise = bcrypt.compare(password, user.password);
-      const compareTimeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Password comparison timeout')), 3000)
-      );
-      isValidPassword = await Promise.race([comparePromise, compareTimeout]);
-    } catch (timeoutError) {
-      console.warn('⚠️  Password comparison timeout');
-      return res.status(500).json({ error: 'Authentication timeout. Please try again.' });
+      userByUsername = await User.findOne({ username });
+      userByEmail = userByUsername ? null : await User.findOne({ email: username });
+    } catch (e) {
+      // If the primary user lookup throws, fall back to DatabaseManager.
+      usedDbFallback = true;
+      console.warn('⚠️  Primary user lookup failed; falling back to local DB:', e?.message || e);
     }
 
-    if (!isValidPassword) {
-      return res.status(401).json({ error: 'Invalid username or password' });
+    let user = userByUsername || userByEmail;
+
+    // If primary lookup returned null, fall back to local DB lookup.
+    if (!user) {
+      usedDbFallback = true;
+      const rowByUsername = await db.getUserByUsername(username);
+      const rowByEmail = rowByUsername ? null : await db.getUserByEmail(username);
+      const row = rowByUsername || rowByEmail;
+
+      if (row) {
+        console.warn('⚠️  Using SQLite/Postgres auth fallback for login:', { identifier: username });
+        user = {
+          id: row.id,
+          username: row.username,
+          email: row.email,
+          password: row.password_hash,
+          createdAt: row.created_at,
+          lastLogin: row.last_login,
+          isActive: true,
+        };
+      }
     }
 
-    // Update last login
-        await User.updateLastLogin(user.id);
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
-    // Generate JWT token
-    const token = jwt.sign(
-          { userId: user.id, username: user.username },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    if (!isValidPassword) return res.status(401).json({ error: 'Invalid credentials' });
 
-        return res.json({
+    if (usedDbFallback) {
+      await db.updateUserLastLogin(user.id);
+    } else {
+      await User.updateLastLogin(user.id);
+    }
+
+    const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+
+    return res.json({
       message: 'Login successful',
       token,
-      user: {
-            id: user.id,
-        username: user.username,
-        email: user.email,
-            lastLogin: new Date()
-      }
+      user: { id: user.id, username: user.username, email: user.email, lastLogin: new Date() },
     });
-      } catch (supabaseError) {
-        console.warn('⚠️  Supabase login failed, falling back to SQLite:', supabaseError.message);
-      }
-    }
-
-    try {
-      const user = await db.getUserByUsername(username);
-      
-      if (!user) {
-        return res.status(401).json({ error: 'Invalid username or password' });
-      }
-
-      // Check password with timeout
-      let isValidPassword;
-      try {
-        const comparePromise = bcrypt.compare(password, user.password_hash);
-        const compareTimeout = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Password comparison timeout')), 3000)
-        );
-        isValidPassword = await Promise.race([comparePromise, compareTimeout]);
-      } catch (timeoutError) {
-        console.warn('⚠️  Password comparison timeout in SQLite');
-        return res.status(500).json({ error: 'Authentication timeout. Please try again.' });
-      }
-      
-      if (!isValidPassword) {
-        return res.status(401).json({ error: 'Invalid username or password' });
-      }
-
-      await db.updateUserLastLogin(user.id);
-
-      // Generate JWT token
-        const token = jwt.sign(
-        { userId: user.id, username: user.username },
-          JWT_SECRET,
-          { expiresIn: '7d' }
-        );
-
-        return res.json({
-        message: 'Login successful',
-          token,
-          user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-            lastLogin: new Date()
-          }
-        });
-
-    } catch (authDbError) {
-      console.error('❌ Local DB authentication failed:', authDbError.message);
-      return res.status(500).json({ error: 'Authentication system unavailable' });
-    }
 
   } catch (error) {
     console.error('❌ Login error:', error);
@@ -1874,64 +1712,19 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/auth/profile', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
-    
-    // Check if this is a SQLite user ID (starts with "user-")
-    const isSQLiteUser = typeof userId === 'string' && userId.startsWith('user-');
-    
-    // Try Supabase first if connected and user ID looks like UUID (Supabase format)
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
-    if (supabaseConnected && !isSQLiteUser && isUUID) {
-      try {
-        const user = await User.findById(userId);
-        if (user) {
-          return res.json({
-      user: {
-              id: user.id,
-        username: user.username,
-        email: user.email,
-        createdAt: user.createdAt,
-        lastLogin: user.lastLogin
-      }
-    });
-        }
-      } catch (supabaseError) {
-        // If Supabase query fails, fall through to SQLite
-        console.warn('⚠️  Supabase profile fetch failed, falling back to SQLite:', supabaseError.message);
-      }
-    }
-    
-    // Fallback to SQLite user (or if Supabase not connected)
-    if (isSQLiteUser || !supabaseConnected) {
-      try {
-        const user = await db.getUserById(userId);
-        if (user) {
-          return res.json({
-            user: {
-              id: user.id,
-              username: user.username,
-              email: user.email,
-              createdAt: user.created_at,
-              lastLogin: user.last_login
-            }
-          });
-        }
-      } catch (dbError) {
-        console.warn('⚠️  SQLite user fetch failed:', dbError.message);
-      }
-      
-      // Fallback: return basic info from JWT token if user not found in DB
-      return res.json({
-        user: {
-          id: userId,
-          username: req.user.username || 'User',
-          email: `${req.user.username || 'user'}@example.com`,
-          createdAt: new Date(parseInt(userId.split('-')[1]) || Date.now()),
-          lastLogin: new Date()
-        }
-      });
-    }
 
-    return res.status(404).json({ error: 'User not found' });
+    const row = await db.getUserById(userId);
+    if (!row) return res.status(404).json({ error: 'User not found' });
+
+    return res.json({
+      user: {
+        id: row.id,
+        username: row.username,
+        email: row.email,
+        createdAt: row.created_at,
+        lastLogin: row.last_login,
+      },
+    });
 
   } catch (error) {
     console.error('❌ Profile fetch error:', error);
@@ -1957,29 +1750,7 @@ app.get('/api/auth/me', async (req, res) => {
       }
 
       try {
-        // Check if Supabase is available
-        const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(decoded.userId);
-        if (supabaseConnected && isUUID) {
-          try {
-            const user = await User.findById(decoded.userId);
-            if (user) {
-              return res.json({
-                user: {
-                  id: user.id,
-                  username: user.username,
-                  email: user.email,
-                  createdAt: user.createdAt,
-                  lastLogin: user.lastLogin
-                }
-              });
-            }
-          } catch (supabaseError) {
-            console.warn('⚠️  Supabase user fetch failed:', supabaseError.message);
-          }
-        }
-
-        // Fallback for SQLite users or when Supabase is unavailable
-        // For now, return the decoded token info
+        // Token validation only: return decoded token info
         return res.json({
           user: {
             id: decoded.userId,
@@ -2027,36 +1798,18 @@ app.put('/api/auth/profile', authenticateToken, async (req, res) => {
       }
     }
 
-    // Update in Supabase or SQLite
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.user.userId);
-    if (supabaseConnected && supabase && isUUID) {
-      const updateData = {};
-      if (username) updateData.username = username;
-      if (email) updateData.email = email;
-      
-      const { data, error } = await supabase
-        .from('users')
-        .update(updateData)
-        .eq('id', req.user.userId)
-        .select()
-        .single();
-      
-      if (error) throw error;
-      
-      return res.json({
+    await db.updateUserProfile(req.user.userId, { username, email });
+    const updated = await db.getUserById(req.user.userId);
+    return res.json({
       message: 'Profile updated successfully',
       user: {
-          id: data.id,
-          username: data.username,
-          email: data.email,
-          createdAt: data.created_at,
-          lastLogin: data.last_login
+        id: updated.id,
+        username: updated.username,
+        email: updated.email,
+        createdAt: updated.created_at,
+        lastLogin: updated.last_login,
       }
     });
-    } else {
-      // SQLite update would go here
-      return res.status(500).json({ error: 'Profile update not yet implemented for SQLite users' });
-    }
 
   } catch (error) {
     console.error('❌ Profile update error:', error);
@@ -2091,26 +1844,10 @@ app.put('/api/auth/password', authenticateToken, async (req, res) => {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
 
-    // Hash new password and update in Supabase or SQLite
+    // Hash new password and update in local DB
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
-    
-    if (
-      supabaseConnected &&
-      supabase &&
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.user.userId)
-    ) {
-      // Update in Supabase
-      const { error } = await supabase
-        .from('users')
-        .update({ password_hash: hashedPassword })
-        .eq('id', req.user.userId);
-      
-      if (error) throw error;
-    } else {
-      // Update in SQLite (would need to implement this in DatabaseManager)
-      return res.status(500).json({ error: 'Password update not yet implemented for SQLite users' });
-    }
+    await db.updateUserPassword(req.user.userId, hashedPassword);
 
     res.json({ message: 'Password changed successfully' });
 
